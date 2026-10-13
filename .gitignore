@@ -1,0 +1,42 @@
+
+# Secrets and environment variables
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# JavaScript / desktop builds
+node_modules/
+dist/
+build/
+src-tauri/target/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Personal Spotify export and processed data
+data/raw/spotify/*
+data/processed/*
+
+# Local audio and artwork
+music/
+audio/
+*.mp3
+*.m4a
+*.flac
+*.wav
+*.aac
+*.ogg
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
