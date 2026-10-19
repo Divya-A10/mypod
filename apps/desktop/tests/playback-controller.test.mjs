@@ -66,7 +66,10 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
+const { HtmlAudioPlaybackDriver } = await vite.ssrLoadModule("/src/playback/HtmlAudioPlaybackDriver.ts");
 const { PlaybackController, PlaybackQueue } = await vite.ssrLoadModule("/src/playback/PlaybackController.ts");
+const { desktopLibraryAdapter } = await vite.ssrLoadModule("/src/library/desktopLibraryAdapter.ts");
+const { getTrackAudioUrl } = await vite.ssrLoadModule("/src/api.ts");
 after(async () => vite.close());
 
 function track(id, title = `Synthetic ${id}`) {
@@ -89,9 +92,95 @@ function track(id, title = `Synthetic ${id}`) {
 
 function setup() {
   const media = new FakeAudio();
-  const controller = new PlaybackController(media, new PlaybackQueue());
+  const controller = new PlaybackController(new HtmlAudioPlaybackDriver(media), new PlaybackQueue());
   return { media, controller };
 }
+
+test("shared controller consumes the platform-neutral driver contract by track ID", async () => {
+  const listeners = new Set();
+  const loaded = [];
+  let paused = true;
+  let currentTime = 0;
+  const driver = {
+    get paused() { return paused; },
+    get currentTime() { return currentTime; },
+    duration: 30,
+    load(trackId) { loaded.push(trackId); currentTime = 0; },
+    async play() {
+      paused = false;
+      for (const listener of listeners) listener({ type: "playing", currentTime, duration: 30, paused, unsupported: false });
+    },
+    pause() { paused = true; },
+    seek(seconds) { currentTime = seconds; },
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+  };
+  const controller = new PlaybackController(driver, new PlaybackQueue());
+  await controller.play(track(8));
+  assert.deepEqual(loaded, [8]);
+  assert.equal(controller.getSnapshot().phase, "playing");
+  assert.equal(controller.getSnapshot().track.id, 8);
+});
+
+test("desktop library adapter delegates to the existing list and track endpoints", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return new Response(JSON.stringify({ items: [], total: 0, limit: 100, offset: 20 }), { status: 200 });
+  };
+  try {
+    const signal = new AbortController().signal;
+    const page = await desktopLibraryAdapter.listTracks(20, signal);
+    assert.equal(page.offset, 20);
+    assert.equal(requests[0].url, "/api/tracks?limit=100&offset=20");
+    assert.equal(requests[0].options.signal, signal);
+
+    const item = track(9);
+    globalThis.fetch = async (url) => {
+      requests.push({ url });
+      return new Response(JSON.stringify(item), { status: 200 });
+    };
+    assert.equal((await desktopLibraryAdapter.getTrack(9)).id, 9);
+    assert.equal(requests[1].url, "/api/tracks/9");
+    assert.equal(getTrackAudioUrl(9), "/api/tracks/9/audio");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("desktop library adapter validates IDs and preserves HTTP failures", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    await assert.rejects(desktopLibraryAdapter.getTrack(0), /valid library track ID/);
+    globalThis.fetch = async () => new Response("missing", { status: 404 });
+    await assert.rejects(desktopLibraryAdapter.getTrack(9), /Track request failed \(404\)/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("desktop adapters refuse iOS instead of falling back to localhost endpoints", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  let requestCount = 0;
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    return new Response("unexpected", { status: 200 });
+  };
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { userAgent: "iPhone", platform: "iPhone", maxTouchPoints: 5 },
+  });
+  try {
+    await assert.rejects(desktopLibraryAdapter.listTracks(), /iOS.*adapters are not implemented/);
+    assert.throws(() => getTrackAudioUrl(9), /iOS.*adapters are not implemented/);
+    assert.equal(requestCount, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
+    else delete globalThis.navigator;
+  }
+});
 
 test("queue preserves library IDs, order, and repeated entries without starting playback", () => {
   const { controller } = setup();

@@ -1,8 +1,12 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
-import { formatDuration, getTracks, type Track } from "./api";
-import { playbackController, type PlaybackSnapshot } from "./playback/PlaybackController";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { formatDuration, type Track } from "./api";
+import { libraryAdapter } from "./library/libraryAdapter";
+import type { Playlist, PlaylistEntry, SpotifyCsvPreview } from "./library/contracts";
+import type { PlaybackSnapshot } from "./playback/PlaybackController";
+import { playbackAvailable, playbackController } from "./playback/runtime";
 
 type View = "Home" | "Search" | "Your Library" | "Liked Songs";
+const SPOTIFY_PREVIEW_PAGE_SIZE = 50;
 type IconName = "home" | "search" | "library" | "heart" | "plus" | "arrow-left" | "arrow-right" | "play" | "pause" | "previous" | "next" | "volume" | "close" | "music" | "disc" | "artist" | "shuffle" | "repeat" | "menu" | "chevron" | "refresh" | "queue";
 
 function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
@@ -52,7 +56,7 @@ function Art({ label, size = "card" }: { label: string; size?: "card" | "small" 
   );
 }
 
-function TrackRow({ track, index, selected, playback, onSelect, onPlay, onAddToQueue }: { track: Track; index: number; selected: boolean; playback: PlaybackSnapshot; onSelect: (track: Track) => void; onPlay: (track: Track) => void; onAddToQueue: (track: Track) => void }) {
+function TrackRow({ track, index, selected, playback, playbackEnabled, onSelect, onPlay, onAddToQueue }: { track: Track; index: number; selected: boolean; playback: PlaybackSnapshot; playbackEnabled: boolean; onSelect: (track: Track) => void; onPlay: (track: Track) => void; onAddToQueue: (track: Track) => void }) {
   const isPlaying = playback.track?.id === track.id && playback.phase === "playing";
   const isBusy = playback.track?.id === track.id && playback.phase === "loading";
   return (
@@ -67,8 +71,8 @@ function TrackRow({ track, index, selected, playback, onSelect, onPlay, onAddToQ
       </div>
       <span className="track-album">{track.album || "Unknown album"}</span>
       <span className="track-time">{formatDuration(track.duration)}</span>
-      <button className="queue-add" type="button" onClick={() => onAddToQueue(track)} aria-label={`Add ${track.title} to queue`} title="Add to queue"><Icon name="plus" size={16} /></button>
-      <button className="row-play" type="button" onClick={() => onPlay(track)} aria-label={`${isPlaying ? "Pause" : "Play"} ${track.title}`} aria-busy={isBusy} title={isBusy ? "Loading audio" : undefined}>
+      <button className="queue-add" type="button" disabled={!playbackEnabled} onClick={() => onAddToQueue(track)} aria-label={playbackEnabled ? `Add ${track.title} to queue` : "Queue unavailable until iPhone playback is implemented"} title={playbackEnabled ? "Add to queue" : "Queue unavailable on iPhone yet"}><Icon name="plus" size={16} /></button>
+      <button className="row-play" type="button" disabled={!playbackEnabled} onClick={() => onPlay(track)} aria-label={playbackEnabled ? `${isPlaying ? "Pause" : "Play"} ${track.title}` : "Playback unavailable on iPhone yet"} aria-busy={isBusy} title={isBusy ? "Loading audio" : undefined}>
         <Icon name={isPlaying ? "pause" : "play"} size={17} />
       </button>
     </div>
@@ -85,7 +89,30 @@ function CollectionCard({ title, subtitle, shape = "square", icon = "disc" as Ic
   );
 }
 
-function IpodPlayer({ onClose, selectedTrack, playback }: { onClose: () => void; selectedTrack: Track | null; playback: PlaybackSnapshot }) {
+/** Neutral cover shell; a future local artwork URL can be supplied without changing the gallery. */
+function PlaylistCover({ artworkUrl }: { artworkUrl?: string | null }) {
+  return <span className="playlist-cover" aria-hidden="true">
+    {artworkUrl ? <img src={artworkUrl} alt="" loading="lazy" /> : <span className="playlist-cover-placeholder"><span className="playlist-cover-mark"><Icon name="music" size={32} /></span><span className="playlist-cover-lines" /></span>}
+  </span>;
+}
+
+function handlePlaylistGalleryKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  const cards = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("[data-playlist-card]"));
+  if (!cards.length) return;
+  const focusedIndex = cards.indexOf(document.activeElement as HTMLButtonElement);
+  const currentIndex = focusedIndex < 0 ? (event.key === "ArrowRight" ? -1 : 0) : focusedIndex;
+  const nextIndex = Math.max(0, Math.min(cards.length - 1, currentIndex + (event.key === "ArrowRight" ? 1 : -1)));
+  event.preventDefault();
+  cards[nextIndex].focus();
+  cards[nextIndex].scrollIntoView({
+    block: "nearest",
+    inline: "nearest",
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+  });
+}
+
+function IpodPlayer({ onClose, selectedTrack, playback, playbackEnabled }: { onClose: () => void; selectedTrack: Track | null; playback: PlaybackSnapshot; playbackEnabled: boolean }) {
   const closeButton = useRef<HTMLButtonElement>(null);
   const displayTrack = playback.track || selectedTrack;
 
@@ -130,16 +157,16 @@ function IpodPlayer({ onClose, selectedTrack, playback }: { onClose: () => void;
               <span className="ipod-screen-label">{playback.track ? playback.phase : selectedTrack ? "Selected track" : "MyPod player"}</span>
               <strong id="ipod-title">{displayTrack?.title || "No track selected"}</strong>
               <span>{displayTrack ? `${displayTrack.artist || "Unknown artist"} · ${displayTrack.album || "Unknown album"}` : "Choose a track from your library to view its details here."}</span>
-              <span className="ipod-playback-state" id="ipod-description">{playback.error || (playback.track ? "Audio state is reported by the player." : selectedTrack ? "Selected only. Press play to start audio." : "Choose a track, then press play.")}</span>
-              <div className="ipod-progress"><span>{formatDuration(playback.currentTime)}</span><input type="range" min="0" max={playback.duration || 1} value={Math.min(playback.currentTime, playback.duration || 0)} disabled={!playback.track || !playback.duration || playback.phase === "error"} onChange={(event) => playbackController.seek(Number(event.target.value))} aria-label="Seek playback"/><span>{formatDuration(playback.duration)}</span></div>
+              <span className="ipod-playback-state" id="ipod-description">{playbackEnabled ? (playback.error || (playback.track ? "Audio state is reported by the player." : selectedTrack ? "Selected only. Press play to start audio." : "Choose a track, then press play.")) : "iPhone import is available. Native audio playback is a later stage."}</span>
+              <div className="ipod-progress"><span>{formatDuration(playback.currentTime)}</span><input type="range" min="0" max={playback.duration || 1} value={Math.min(playback.currentTime, playback.duration || 0)} disabled={!playbackEnabled || !playback.track || !playback.duration || playback.phase === "error"} onChange={(event) => playbackController.seek(Number(event.target.value))} aria-label="Seek playback"/><span>{formatDuration(playback.duration)}</span></div>
             </div>
           </div>
           <div className="click-wheel" role="group" aria-label="Player click wheel controls">
             <span className="wheel-ring" aria-hidden="true" />
             <button className="wheel-menu" onClick={onClose} type="button" aria-label="Menu: close player">MENU</button>
-            <button className="wheel-action wheel-prev" type="button" disabled={!playback.track} onClick={() => void playbackController.previous()} aria-label="Previous track"><Icon name="previous" size={20} /><span>PREV</span></button>
-            <button className="wheel-action wheel-next" type="button" disabled={playback.queue.length === 0} onClick={() => void playbackController.next()} aria-label={playback.queue.length ? "Play next queued track" : "Next track unavailable: queue is empty"}><Icon name="next" size={20} /><span>NEXT</span></button>
-            <button className="wheel-action wheel-play" type="button" disabled={!displayTrack} onClick={() => playbackController.toggle(displayTrack)} aria-label={playback.phase === "playing" ? "Pause playback" : "Play playback"}><Icon name={playback.phase === "playing" ? "pause" : "play"} size={19} /><span>{playback.phase === "playing" ? "PAUSE" : "PLAY"}</span></button>
+            <button className="wheel-action wheel-prev" type="button" disabled={!playbackEnabled || !playback.track} onClick={() => void playbackController.previous()} aria-label="Previous track"><Icon name="previous" size={20} /><span>PREV</span></button>
+            <button className="wheel-action wheel-next" type="button" disabled={!playbackEnabled || playback.queue.length === 0} onClick={() => void playbackController.next()} aria-label={playback.queue.length ? "Play next queued track" : "Next track unavailable: queue is empty"}><Icon name="next" size={20} /><span>NEXT</span></button>
+            <button className="wheel-action wheel-play" type="button" disabled={!playbackEnabled || !displayTrack} onClick={() => playbackController.toggle(displayTrack)} aria-label={playback.phase === "playing" ? "Pause playback" : "Play playback"}><Icon name={playback.phase === "playing" ? "pause" : "play"} size={19} /><span>{playback.phase === "playing" ? "PAUSE" : "PLAY"}</span></button>
             <button className="wheel-center" type="button" disabled title="There is no player menu or selection action yet" aria-label="Center select unavailable">SELECT</button>
           </div>
         </div>
@@ -168,6 +195,7 @@ function QueuePanel({ playback, onClose, onRemove, onClear }: { playback: Playba
 
 function App() {
   const playback = useSyncExternalStore(playbackController.subscribe, playbackController.getSnapshot, playbackController.getSnapshot);
+  const playbackEnabled = playbackAvailable;
   const [view, setView] = useState<View>("Home");
   const [tracks, setTracks] = useState<Track[]>([]);
   const [total, setTotal] = useState(0);
@@ -179,17 +207,56 @@ function App() {
   const [playerOpen, setPlayerOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [selectedTrack, setSelectedTrack] = useState<Track | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState<string | null>(null);
+  const [spotifyPreview, setSpotifyPreview] = useState<SpotifyCsvPreview | null>(null);
+  const [spotifyPreviewPage, setSpotifyPreviewPage] = useState(0);
+  const [previewingSpotifyCsv, setPreviewingSpotifyCsv] = useState(false);
+  const [spotifyPreviewMessage, setSpotifyPreviewMessage] = useState<string | null>(null);
+  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [activePlaylistId, setActivePlaylistId] = useState<number | null>(null);
+  const [playlistEntries, setPlaylistEntries] = useState<PlaylistEntry[]>([]);
+  const [playlistBusy, setPlaylistBusy] = useState(false);
+  const [playlistError, setPlaylistError] = useState<string | null>(null);
+  const [playlistDialog, setPlaylistDialog] = useState<"create" | "rename" | "add" | "delete" | null>(null);
+  const [playlistName, setPlaylistName] = useState("");
+  const playlistAdapter = libraryAdapter.playlists;
+
+  const refreshPlaylists = async () => {
+    if (!playlistAdapter) return;
+    try {
+      const result = await playlistAdapter.listPlaylists();
+      setPlaylists(result);
+      if (activePlaylistId !== null && !result.some((playlist) => playlist.id === activePlaylistId)) {
+        setActivePlaylistId(null);
+        setPlaylistEntries([]);
+      }
+    } catch (reason) {
+      setPlaylistError(reason instanceof Error ? reason.message : "Playlists could not be loaded.");
+    }
+  };
+
+  const selectPlaylist = async (playlistId: number) => {
+    setActivePlaylistId(playlistId);
+    setPlaylistError(null);
+    if (!playlistAdapter) return;
+    try {
+      setPlaylistEntries(await playlistAdapter.listEntries(playlistId));
+    } catch (reason) {
+      setPlaylistError(reason instanceof Error ? reason.message : "Playlist tracks could not be loaded.");
+    }
+  };
 
   const loadLibrary = async (signal?: AbortSignal) => {
     setLoading(true);
     setError(null);
     try {
-      const result = await getTracks(0, signal);
+      const result = await libraryAdapter.listTracks(0, signal);
       setTracks(result.items);
       setTotal(result.total);
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === "AbortError") return;
-      setError("The local library could not be loaded. Check the local API and try again.");
+      setError(libraryAdapter.importAudio ? "The on-device catalog could not be loaded. Retry in a moment." : "The local library could not be loaded. Check the local API and try again.");
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
@@ -198,11 +265,11 @@ function App() {
   const loadMore = async () => {
     setLoadingMore(true);
     try {
-      const result = await getTracks(tracks.length);
+      const result = await libraryAdapter.listTracks(tracks.length);
       setTracks((current) => [...current, ...result.items]);
       setTotal(result.total);
     } catch {
-      setError("More tracks could not be loaded. Check the local API and try again.");
+      setError(libraryAdapter.importAudio ? "More on-device tracks could not be loaded. Retry in a moment." : "More tracks could not be loaded. Check the local API and try again.");
     } finally {
       setLoadingMore(false);
     }
@@ -213,6 +280,91 @@ function App() {
     void loadLibrary(controller.signal);
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    void refreshPlaylists();
+  }, []);
+
+  const submitPlaylistDialog = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!playlistAdapter) return;
+    setPlaylistBusy(true);
+    setPlaylistError(null);
+    try {
+      if (playlistDialog === "create") {
+        const created = await playlistAdapter.createPlaylist(playlistName);
+        setPlaylists((current) => [created, ...current]);
+        setActivePlaylistId(created.id);
+        setPlaylistEntries([]);
+      } else if (playlistDialog === "rename" && activePlaylistId !== null) {
+        const renamed = await playlistAdapter.renamePlaylist(activePlaylistId, playlistName);
+        setPlaylists((current) => current.map((playlist) => playlist.id === renamed.id ? renamed : playlist));
+      } else if (playlistDialog === "delete" && activePlaylistId !== null) {
+        await playlistAdapter.deletePlaylist(activePlaylistId);
+        setPlaylists((current) => current.filter((playlist) => playlist.id !== activePlaylistId));
+        setActivePlaylistId(null);
+        setPlaylistEntries([]);
+      }
+      setPlaylistDialog(null);
+      setPlaylistName("");
+      await refreshPlaylists();
+    } catch (reason) {
+      setPlaylistError(reason instanceof Error ? reason.message : "The playlist action could not be completed.");
+    } finally {
+      setPlaylistBusy(false);
+    }
+  };
+
+  const addTrackToPlaylist = async (trackId: number) => {
+    if (!playlistAdapter || activePlaylistId === null) return;
+    setPlaylistBusy(true);
+    setPlaylistError(null);
+    try {
+      const entry = await playlistAdapter.addTrack(activePlaylistId, trackId);
+      setPlaylistEntries((current) => [...current, entry]);
+      await refreshPlaylists();
+    } catch (reason) {
+      setPlaylistError(reason instanceof Error ? reason.message : "Track could not be added.");
+    } finally {
+      setPlaylistBusy(false);
+    }
+  };
+
+  const removePlaylistEntry = async (entryId: number) => {
+    if (!playlistAdapter || activePlaylistId === null) return;
+    try {
+      await playlistAdapter.removeEntry(activePlaylistId, entryId);
+      await selectPlaylist(activePlaylistId);
+      await refreshPlaylists();
+    } catch (reason) {
+      setPlaylistError(reason instanceof Error ? reason.message : "Playlist entry could not be removed.");
+    }
+  };
+
+  const movePlaylistEntry = async (entryIndex: number, direction: -1 | 1) => {
+    if (!playlistAdapter || activePlaylistId === null) return;
+    const target = entryIndex + direction;
+    if (target < 0 || target >= playlistEntries.length) return;
+    const order = playlistEntries.map((entry) => entry.id);
+    [order[entryIndex], order[target]] = [order[target], order[entryIndex]];
+    try {
+      setPlaylistEntries(await playlistAdapter.reorderEntries(activePlaylistId, order));
+      await refreshPlaylists();
+    } catch (reason) {
+      setPlaylistError(reason instanceof Error ? reason.message : "Playlist order could not be saved.");
+    }
+  };
+
+  const playPlaylistEntry = async (entry: PlaylistEntry) => {
+    if (entry.track_id === null) return;
+    try {
+      const track = tracks.find((candidate) => candidate.id === entry.track_id) ?? await libraryAdapter.getTrack(entry.track_id);
+      setSelectedTrack(track);
+      await playbackController.play(track);
+    } catch (reason) {
+      setPlaylistError(reason instanceof Error ? reason.message : "This playlist track could not be played.");
+    }
+  };
 
   const artists = useMemo(() => [...new Set(tracks.map((track) => track.artist).filter((artist): artist is string => Boolean(artist)))].sort((a, b) => a.localeCompare(b)), [tracks]);
   const albums = useMemo(() => [...new Map(tracks.filter((track) => track.album).map((track) => [`${track.album}\u0000${track.artist || ""}`, track])).values()], [tracks]);
@@ -233,6 +385,45 @@ function App() {
     setView("Search");
   };
 
+  const importAudio = async () => {
+    if (!libraryAdapter.importAudio) return;
+    setImporting(true);
+    setImportMessage(null);
+    try {
+      const result = await libraryAdapter.importAudio();
+      if (result.status === "cancelled") return;
+      setImportMessage(result.status === "duplicate" ? `Already imported: ${result.track.title}` : `Imported: ${result.track.title}`);
+      await loadLibrary();
+    } catch (reason) {
+      setImportMessage(reason instanceof Error ? reason.message : "The audio file could not be imported.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const previewSpotifyCsv = async () => {
+    if (!libraryAdapter.previewSpotifyCsv) return;
+    setPreviewingSpotifyCsv(true);
+    setSpotifyPreviewMessage(null);
+    setSpotifyPreview(null);
+    setSpotifyPreviewPage(0);
+    try {
+      const result = await libraryAdapter.previewSpotifyCsv();
+      if (result.status === "cancelled") return;
+      setSpotifyPreview(result.preview);
+      setSpotifyPreviewPage(0);
+    } catch (reason) {
+      setSpotifyPreviewMessage(reason instanceof Error ? reason.message : "The CSV could not be previewed.");
+    } finally {
+      setPreviewingSpotifyCsv(false);
+    }
+  };
+
+  const previewRows = spotifyPreview?.rows.slice(
+    spotifyPreviewPage * SPOTIFY_PREVIEW_PAGE_SIZE,
+    (spotifyPreviewPage + 1) * SPOTIFY_PREVIEW_PAGE_SIZE,
+  ) ?? [];
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -246,7 +437,7 @@ function App() {
         </nav>
         <div className="sidebar-rule" />
         <section className="sidebar-library" aria-label="Your library">
-          <div className="sidebar-library-heading"><h2>Your Library</h2><button type="button" aria-label="Create playlist unavailable" title="Playlist creation is not available yet" disabled><Icon name="plus" size={20} /></button></div>
+          <div className="sidebar-library-heading"><h2>Your Library</h2><button type="button" aria-label={playlistAdapter ? "Create playlist" : "Create playlist unavailable"} title={playlistAdapter ? "Create playlist" : "Playlist creation is not available yet"} disabled={!playlistAdapter} onClick={() => { setPlaylistName(""); setPlaylistDialog("create"); }}><Icon name="plus" size={20} /></button></div>
           <div className="sidebar-library-filters" aria-label="Library categories">
             {(["Tracks", "Albums", "Artists", "Playlists"] as const).map((filter) => <button key={filter} type="button" onClick={() => { setLibraryFilter(filter); navigate("Your Library"); }}>{filter}</button>)}
           </div>
@@ -263,7 +454,7 @@ function App() {
             </button>)}
             {!loading && !error && albums.length === 0 && artists.length === 0 && <p className="sidebar-no-library">Your scanned albums and artists will appear here.</p>}
           </div>
-          <div className="playlist-empty"><span className="playlist-empty-dot" /><p>No playlists yet</p><small>Playlist tools are coming later.</small></div>
+          {playlistAdapter ? playlists.map((playlist) => <button key={playlist.id} className={`sidebar-collection-item ${activePlaylistId === playlist.id ? "sidebar-item-active" : ""}`} type="button" onClick={() => { setLibraryFilter("Playlists"); navigate("Your Library"); void selectPlaylist(playlist.id); }}><span className="sidebar-artist-art"><Icon name="library" size={18} /></span><span className="sidebar-item-copy"><strong>{playlist.name}</strong><small>Playlist · {playlist.track_count} {playlist.track_count === 1 ? "track" : "tracks"}</small></span></button>) : <div className="playlist-empty"><span className="playlist-empty-dot" /><p>No playlists yet</p><small>Playlist tools are coming later.</small></div>}
         </section>
         <div className="sidebar-bottom"><span className="privacy-dot" /> On this device</div>
       </aside>
@@ -297,7 +488,7 @@ function App() {
               <ApiStatus loading={loading} error={error} retry={() => void loadLibrary()} />
               <section className="content-section">
                 <SectionTitle title="Albums in your library" action="Your Library" onAction={() => { setLibraryFilter("Albums"); navigate("Your Library"); }} />
-                {tracks.length === 0 ? <EmptyState icon="music" title={error ? "Local library is unavailable" : loading ? "Checking your library" : "Your library is ready for its first scan"} copy={error ? "Check the local API and retry; no track data is available until it responds." : loading ? "Waiting for the local library API." : "Once you scan a permitted music folder, your albums and artists will show up here."} /> : (
+              {tracks.length === 0 ? <EmptyState icon="music" title={error ? "Local library is unavailable" : loading ? "Checking your library" : "Your library is ready for its first scan"} copy={error ? (libraryAdapter.importAudio ? "Retry the on-device catalog. No imported tracks are available until it responds." : "Check the local API and retry; no track data is available until it responds.") : loading ? "Waiting for your local library." : libraryAdapter.importAudio ? "Import an audio file from Files to add it to this iPhone." : "Once you scan a permitted music folder, your albums and artists will show up here."} /> : (
                   <div className="collection-grid collection-shelf">
                     {albums.slice(0, 4).map((album) => <CollectionCard key={`${album.album}-${album.artist}`} title={album.album || "Unknown album"} subtitle={`Album · ${album.artist || "Unknown artist"}`} icon="disc" />)}
                     {albums.length === 0 && <EmptyState icon="disc" title="No album tags yet" copy="Tracks without album metadata are still available in your library." />}
@@ -310,23 +501,51 @@ function App() {
                   {artists.slice(0, 8).map((artist) => <CollectionCard key={artist} title={artist} subtitle="Artist from your library" shape="circle" icon="artist" />)}
                 </div>
               </section>}
-                {tracks.length > 0 && <TrackSection title="In your library" tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} onSelectTrack={setSelectedTrack} onPlay={(track) => void playbackController.play(track)} onAddToQueue={(track) => playbackController.enqueue(track)} />}
+              {tracks.length > 0 && <TrackSection title="In your library" tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} playbackEnabled={playbackEnabled} onSelectTrack={setSelectedTrack} onPlay={(track) => void playbackController.play(track)} onAddToQueue={(track) => playbackController.enqueue(track)} />}
             </>}
 
             {view === "Search" && <>
               <div className="page-heading"><p className="eyebrow">FIND SOMETHING FAMILIAR</p><h1>Search</h1><p>Search tracks, artists, and albums among tracks currently loaded from your library.</p></div>
               <ApiStatus loading={loading} error={error} retry={() => void loadLibrary()} />
-              {query.trim() ? <><TrackSection title={`Results in loaded tracks for “${query.trim()}”`} tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} onSelectTrack={setSelectedTrack} onPlay={(track) => void playbackController.play(track)} onAddToQueue={(track) => playbackController.enqueue(track)} emptyCopy="No matching tracks in the loaded part of your library." /><LoadMore count={tracks.length} total={total} loading={loadingMore} onLoad={loadMore} /></> : <EmptyState icon="search" title="Search your library" copy="Type a track, artist, or album name to find it on this device." />}
+              {query.trim() ? <><TrackSection title={`Results in loaded tracks for “${query.trim()}”`} tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} playbackEnabled={playbackEnabled} onSelectTrack={setSelectedTrack} onPlay={(track) => void playbackController.play(track)} onAddToQueue={(track) => playbackController.enqueue(track)} emptyCopy="No matching tracks in the loaded part of your library." /><LoadMore count={tracks.length} total={total} loading={loadingMore} onLoad={loadMore} /></> : <EmptyState icon="search" title="Search your library" copy="Type a track, artist, or album name to find it on this device." />}
             </>}
 
             {view === "Your Library" && <>
-              <div className="page-heading library-heading"><div><p className="eyebrow">YOUR COLLECTION</p><h1>Your Library</h1><p>{total ? `${total} tracks indexed on this device` : "Your local collection, all in one place."}</p></div><button className="round-action" type="button" onClick={() => void loadLibrary()} aria-label="Refresh library"><Icon name="refresh" /></button></div>
+              <div className="page-heading library-heading"><div><p className="eyebrow">YOUR COLLECTION</p><h1>Your Library</h1><p>{total ? `${total} tracks indexed on this device` : "Your local collection, all in one place."}</p></div><div className="library-actions">{libraryAdapter.previewSpotifyCsv && <button className="import-audio-button" type="button" onClick={() => void previewSpotifyCsv()} disabled={previewingSpotifyCsv}>{previewingSpotifyCsv ? "Reading CSV…" : "Preview Spotify CSV"}</button>}{libraryAdapter.importAudio && <button className="import-audio-button" type="button" onClick={() => void importAudio()} disabled={importing}>{importing ? "Importing…" : "Import audio"}</button>}<button className="round-action" type="button" onClick={() => void loadLibrary()} aria-label="Refresh library"><Icon name="refresh" /></button></div></div>
+              {importMessage && <p className="import-status" role="status" aria-live="polite">{importMessage}</p>}
+              {libraryAdapter.previewSpotifyCsv && <section className="spotify-preview" aria-labelledby="spotify-preview-title">
+                <div className="spotify-preview-intro"><div><h2 id="spotify-preview-title">Spotify CSV preview</h2><p>Read-only review. This does not add tracks, playlists, favorites, or audio to MyPod.</p></div>{spotifyPreview && <button type="button" className="preview-dismiss" onClick={() => setSpotifyPreview(null)}>Close preview</button>}</div>
+                {spotifyPreviewMessage && <p className="spotify-preview-message" role="alert">{spotifyPreviewMessage}</p>}
+                {spotifyPreview && <>
+                  <div className={`spotify-preview-summary${spotifyPreview.complete ? "" : " preview-incomplete"}`} role="status" aria-live="polite">
+                    <strong>{spotifyPreview.complete ? "Preview complete" : "Partial preview — later records could not be recovered"}</strong>
+                    <span>{spotifyPreview.summary.preview_rows} non-empty records shown · {spotifyPreview.summary.ignored_empty_records} empty records ignored · {spotifyPreview.summary.rows_with_errors} rows with errors · {spotifyPreview.summary.rows_with_warnings} warnings</span>
+                  </div>
+                  {spotifyPreview.file_errors.length > 0 && <ul className="spotify-preview-issues" aria-label="File-level diagnostics">{spotifyPreview.file_errors.map((issue, index) => <li key={`${issue.code}-${index}`}><strong>{issue.code.replaceAll("_", " ")}</strong>{issue.message && ` — ${issue.message}`}{issue.columns && `: ${issue.columns.join(", ")}`}{issue.physical_line_start && ` (physical lines ${issue.physical_line_start}–${issue.physical_line_end})`}</li>)}</ul>}
+                  {spotifyPreview.summary.ignored_empty_spans.length > 0 && <details className="spotify-preview-duplicates"><summary>Empty source rows and line spans</summary><ul>{spotifyPreview.summary.ignored_empty_spans.map((span) => <li key={`${span.source_record_start}-${span.source_record_end}`}>Source record{span.source_record_start === span.source_record_end ? "" : "s"} {span.source_record_start}{span.source_record_end === span.source_record_start ? "" : `–${span.source_record_end}`} · physical lines {span.physical_line_start}–{span.physical_line_end}</li>)}</ul></details>}
+                  {spotifyPreview.duplicate_reports.length > 0 && <details className="spotify-preview-duplicates"><summary>{spotifyPreview.duplicate_reports.length} duplicate or metadata conflict reports</summary><ul>{spotifyPreview.duplicate_reports.map((report) => <li key={report.report_id}><strong>{report.category.replaceAll("_", " ")}</strong> · source records {report.source_records.join(", ")}{report.differing_fields?.length ? ` · differing: ${report.differing_fields.join(", ")}` : ""}</li>)}</ul></details>}
+                  {spotifyPreview.summary.preview_rows > 0 && <>
+                    <p className="spotify-preview-page-note">Showing source records {previewRows[0]?.source_record}–{previewRows.at(-1)?.source_record} of {spotifyPreview.summary.preview_rows}. IDs and Type values are opaque source values.</p>
+                    <div className="spotify-preview-table-wrap" role="region" aria-label="CSV records; scroll horizontally to see all columns" tabIndex={0}><table className="spotify-preview-table"><thead><tr><th scope="col">Record / lines</th><th scope="col">Track</th><th scope="col">Artist</th><th scope="col">Album</th><th scope="col">Playlist label</th><th scope="col">Type (source)</th><th scope="col">Spotify ID (opaque)</th><th scope="col">Review</th><th scope="col">Original source cells</th></tr></thead><tbody>{previewRows.map((row) => <tr key={row.source_record}><td>{row.source_record}<small>{row.physical_line_start === row.physical_line_end ? `line ${row.physical_line_start}` : `lines ${row.physical_line_start}–${row.physical_line_end}`}</small></td><td>{row.mapped.track_name || "—"}</td><td>{row.mapped.artist_name || "—"}</td><td>{row.mapped.album || "—"}</td><td>{row.mapped.playlist_name || "—"}</td><td>{row.mapped.source_type || "—"}</td><td>{row.mapped.spotify_id || "—"}</td><td>{[...row.errors, ...row.warnings].map((issue) => issue.code.replaceAll("_", " ")).concat(row.duplicate_reports.map((id) => `report ${id}`)).join("; ") || "Reviewable"}</td><td><details><summary>View cells</summary><pre>{JSON.stringify(row.source_values)}</pre></details></td></tr>)}</tbody></table></div>
+                    <nav className="spotify-preview-pagination" aria-label="Preview pages"><button type="button" onClick={() => setSpotifyPreviewPage((page) => Math.max(0, page - 1))} disabled={spotifyPreviewPage === 0}>Previous records</button><span>Page {spotifyPreviewPage + 1} of {Math.ceil(spotifyPreview.summary.preview_rows / SPOTIFY_PREVIEW_PAGE_SIZE)}</span><button type="button" onClick={() => setSpotifyPreviewPage((page) => Math.min(Math.ceil(spotifyPreview.summary.preview_rows / SPOTIFY_PREVIEW_PAGE_SIZE) - 1, page + 1))} disabled={(spotifyPreviewPage + 1) * SPOTIFY_PREVIEW_PAGE_SIZE >= spotifyPreview.summary.preview_rows}>Next records</button></nav>
+                  </>}
+                </>}
+              </section>}
               <div className="filter-pills" role="tablist" aria-label="Library filters">{["Tracks", "Artists", "Albums", "Playlists"].map((filter) => <button role="tab" aria-selected={libraryFilter === filter} className={libraryFilter === filter ? "pill-active" : ""} key={filter} onClick={() => setLibraryFilter(filter)}>{filter}</button>)}</div>
               <ApiStatus loading={loading} error={error} retry={() => void loadLibrary()} />
-              {libraryFilter === "Tracks" && <TrackSection title="Tracks" tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} onSelectTrack={setSelectedTrack} onPlay={(track) => void playbackController.play(track)} onAddToQueue={(track) => playbackController.enqueue(track)} emptyCopy="Your scanned tracks will appear here." />}
+              {libraryFilter === "Tracks" && <TrackSection title="Tracks" tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} playbackEnabled={playbackEnabled} onSelectTrack={setSelectedTrack} onPlay={(track) => void playbackController.play(track)} onAddToQueue={(track) => playbackController.enqueue(track)} emptyCopy={libraryAdapter.importAudio ? "Import an audio file from Files to add it to your library." : "Your scanned tracks will appear here."} />}
               {libraryFilter === "Artists" && <CollectionSection title="Artists" items={artists.map((artist) => ({ title: artist, subtitle: "Artist", shape: "circle" as const, icon: "artist" as IconName }))} emptyTitle="No artists yet" />}
               {libraryFilter === "Albums" && <CollectionSection title="Albums" items={albums.map((album) => ({ title: album.album || "Unknown album", subtitle: album.artist || "Unknown artist", icon: "disc" as IconName }))} emptyTitle="No albums yet" />}
-              {libraryFilter === "Playlists" && <EmptyState icon="library" title="Playlist support is coming later" copy="MyPod does not have playlist data or playlist APIs yet." />}
+              {libraryFilter === "Playlists" && (playlistAdapter ? <section className="playlist-manager" aria-label="Playlists">
+                {playlistError && <p className="playlist-error" role="alert">{playlistError}</p>}
+                {activePlaylistId === null ? <>
+                  <div className="section-title"><h2>Your playlists</h2><button type="button" onClick={() => { setPlaylistName(""); setPlaylistDialog("create"); }}><Icon name="plus" size={16} /> New playlist</button></div>
+                  {playlists.length ? <><p className="visually-hidden" id="playlist-gallery-help">Swipe or scroll horizontally to browse. Use the left and right arrow keys to move between playlists.</p><div className="playlist-gallery" role="list" aria-label="Your playlists" aria-describedby="playlist-gallery-help" tabIndex={0} onKeyDown={handlePlaylistGalleryKeyDown}>{playlists.map((playlist) => <div className="playlist-card-item" role="listitem" key={playlist.id}><button className="playlist-card" type="button" data-playlist-card onClick={() => void selectPlaylist(playlist.id)} aria-label={`Open ${playlist.name}, ${playlist.track_count} ${playlist.track_count === 1 ? "track" : "tracks"}`}><PlaylistCover /><strong>{playlist.name}</strong><small>{playlist.track_count} {playlist.track_count === 1 ? "track" : "tracks"}</small></button></div>)}</div></> : <EmptyState icon="library" title="No playlists yet" copy="Create a playlist, then add tracks from this on-device library." />}
+                </> : <>
+                  <div className="playlist-detail-heading"><button type="button" className="playlist-back" onClick={() => setActivePlaylistId(null)}>All playlists</button><div className="playlist-heading-copy"><p className="eyebrow">ON THIS DEVICE</p><h2>{playlists.find((playlist) => playlist.id === activePlaylistId)?.name || "Playlist"}</h2><p>{playlistEntries.length} {playlistEntries.length === 1 ? "entry" : "entries"} · order is saved on this device</p></div><div className="playlist-detail-actions"><button type="button" onClick={() => { setPlaylistName(playlists.find((playlist) => playlist.id === activePlaylistId)?.name || ""); setPlaylistDialog("rename"); }}>Rename</button><button type="button" onClick={() => setPlaylistDialog("delete")}>Delete</button><button type="button" onClick={() => setPlaylistDialog("add")} disabled={tracks.length === 0}>Add tracks</button></div></div>
+                  {playlistEntries.length ? <ol className="playlist-entry-list">{playlistEntries.map((entry, index) => <li key={entry.id} className="playlist-entry-row"><span className="playlist-entry-position">{index + 1}</span><Art label={entry.album || entry.title} size="small" /><div className="playlist-entry-copy"><strong>{entry.title}</strong><span>{entry.artist || (entry.track_id === null ? "Unmatched source track · kept for review" : "Unknown artist")}{entry.album ? ` · ${entry.album}` : ""}</span></div>{entry.track_id !== null ? <button type="button" className="playlist-entry-play" onClick={() => void playPlaylistEntry(entry)} disabled={!playbackEnabled} aria-label={`Play ${entry.title}`}><Icon name="play" size={16} /></button> : <span className="playlist-unmatched">Review</span>}<div className="playlist-order-controls"><button type="button" onClick={() => void movePlaylistEntry(index, -1)} disabled={index === 0 || playlistBusy} aria-label={`Move ${entry.title} up`}>↑</button><button type="button" onClick={() => void movePlaylistEntry(index, 1)} disabled={index === playlistEntries.length - 1 || playlistBusy} aria-label={`Move ${entry.title} down`}>↓</button></div><button type="button" className="playlist-entry-remove" onClick={() => void removePlaylistEntry(entry.id)} aria-label={`Remove ${entry.title} from playlist`}><Icon name="close" size={16} /></button></li>)}</ol> : <EmptyState icon="music" title="This playlist is empty" copy="Add one or more tracks from your on-device library. Repeated entries are allowed." />}
+                </>}
+              </section> : <EmptyState icon="library" title="Playlist support is not available here" copy="Playlists are currently stored in the iPhone's on-device catalog." />)}
               <LoadMore count={tracks.length} total={total} loading={loadingMore} onLoad={loadMore} />
             </>}
 
@@ -339,7 +558,7 @@ function App() {
 
         <footer className="playback-bar">
           <div className="now-track"><div className="mini-art"><Icon name="music" size={17} /></div><div className="now-copy"><strong>{playback.track?.title || selectedTrack?.title || "Nothing selected"}</strong><span>{playback.track ? playback.error || playback.phase : selectedTrack ? `${selectedTrack.artist || "Unknown artist"} · selected, not playing` : "Choose a track to begin"}</span></div><button className="heart-quiet" type="button" aria-label="Favorites unavailable" disabled><Icon name="heart" size={17} /></button></div>
-          <div className="transport"><div className="transport-buttons"><button disabled aria-label="Shuffle unavailable" title="Shuffle is not implemented"><Icon name="shuffle" size={17} /></button><button disabled={!playback.track} onClick={() => void playbackController.previous()} aria-label="Previous track" title="Restart current track after 3 seconds, otherwise return to history"><Icon name="previous" size={19} /></button><button className="play-main" disabled={!playback.track && !selectedTrack} onClick={() => playbackController.toggle(selectedTrack)} aria-label={playback.phase === "playing" ? "Pause" : playback.phase === "loading" ? "Cancel loading" : "Play"} title={playback.error || undefined}><Icon name={playback.phase === "playing" ? "pause" : "play"} size={17} /></button><button disabled={playback.queue.length === 0} onClick={() => void playbackController.next()} aria-label={playback.queue.length ? "Play next queued track" : "Next track unavailable: queue is empty"} title="Play the first queued track"><Icon name="next" size={19} /></button><button disabled aria-label="Repeat unavailable" title="Repeat is not implemented"><Icon name="repeat" size={17} /></button></div><div className="seek-row"><span>{formatDuration(playback.currentTime)}</span><input type="range" min="0" max={playback.duration || 1} value={Math.min(playback.currentTime, playback.duration || 0)} disabled={!playback.track || !playback.duration || playback.phase === "error"} onChange={(event) => playbackController.seek(Number(event.target.value))} aria-label="Playback position" /><span>{formatDuration(playback.duration)}</span></div></div>
+          <div className="transport"><div className="transport-buttons"><button disabled aria-label="Shuffle unavailable" title="Shuffle is not implemented"><Icon name="shuffle" size={17} /></button><button disabled={!playbackEnabled || !playback.track} onClick={() => void playbackController.previous()} aria-label="Previous track" title="Restart current track after 3 seconds, otherwise return to history"><Icon name="previous" size={19} /></button><button className="play-main" disabled={!playbackEnabled || (!playback.track && !selectedTrack)} onClick={() => playbackController.toggle(selectedTrack)} aria-label={playbackEnabled ? (playback.phase === "playing" ? "Pause" : playback.phase === "loading" ? "Cancel loading" : "Play") : "Playback unavailable on iPhone yet"} title={playback.error || undefined}><Icon name={playback.phase === "playing" ? "pause" : "play"} size={17} /></button><button disabled={!playbackEnabled || playback.queue.length === 0} onClick={() => void playbackController.next()} aria-label={playback.queue.length ? "Play next queued track" : "Next track unavailable: queue is empty"} title="Play the first queued track"><Icon name="next" size={19} /></button><button disabled aria-label="Repeat unavailable" title="Repeat is not implemented"><Icon name="repeat" size={17} /></button></div><div className="seek-row"><span>{formatDuration(playback.currentTime)}</span><input type="range" min="0" max={playback.duration || 1} value={Math.min(playback.currentTime, playback.duration || 0)} disabled={!playbackEnabled || !playback.track || !playback.duration || playback.phase === "error"} onChange={(event) => playbackController.seek(Number(event.target.value))} aria-label="Playback position" /><span>{formatDuration(playback.duration)}</span></div></div>
           <div className="playback-tools"><button className="queue-toggle" type="button" aria-label={`Open queue, ${playback.queue.length} upcoming`} aria-expanded={queueOpen} onClick={() => setQueueOpen((open) => !open)}><Icon name="queue" size={17} /><span>{playback.queue.length}</span></button><button className="open-player" onClick={() => setPlayerOpen(true)} type="button"><span className="device-glyph">◉</span><span>Now Playing</span></button><Icon name="volume" size={18} /><input type="range" min="0" max="100" value="0" readOnly disabled aria-label="Volume unavailable" /></div>
         </footer>
       </main>
@@ -351,7 +570,15 @@ function App() {
         <button aria-haspopup="dialog" onClick={() => setPlayerOpen(true)}><Icon name="disc" size={20} /><span>Player</span></button>
       </nav>
       {queueOpen && <QueuePanel playback={playback} onClose={() => setQueueOpen(false)} onRemove={(entryId) => playbackController.removeFromQueue(entryId)} onClear={() => playbackController.clearQueue()} />}
-      {playerOpen && <IpodPlayer onClose={() => setPlayerOpen(false)} selectedTrack={selectedTrack} playback={playback} />}
+      {playlistDialog && <div className="playlist-dialog-scrim" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPlaylistDialog(null); }}><section className="playlist-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-dialog-title">
+        <header><h2 id="playlist-dialog-title">{playlistDialog === "create" ? "Create playlist" : playlistDialog === "rename" ? "Rename playlist" : playlistDialog === "delete" ? "Delete playlist?" : "Add tracks"}</h2><button type="button" onClick={() => setPlaylistDialog(null)} aria-label="Close dialog"><Icon name="close" size={18} /></button></header>
+        {playlistDialog === "add" ? <div className="playlist-picker-list">{tracks.length ? tracks.map((track) => <div className="playlist-picker-row" key={track.id}><div><strong>{track.title}</strong><span>{track.artist || "Unknown artist"}</span></div><button type="button" onClick={() => void addTrackToPlaylist(track.id)} disabled={playlistBusy}>Add</button></div>) : <EmptyState icon="music" title="No loaded tracks" copy="Import audio or load tracks before adding them." />}</div> : <form onSubmit={(event) => void submitPlaylistDialog(event)}>
+          {playlistDialog === "delete" ? <p>Playlist entries will be removed. Imported audio files will stay in your library.</p> : <label>Playlist name<input autoFocus value={playlistName} onChange={(event) => setPlaylistName(event.target.value)} maxLength={120} required /></label>}
+          {playlistError && <p className="playlist-error" role="alert">{playlistError}</p>}
+          <footer><button type="button" onClick={() => setPlaylistDialog(null)}>Cancel</button><button type="submit" disabled={playlistBusy}>{playlistBusy ? "Saving…" : playlistDialog === "delete" ? "Delete playlist" : "Save"}</button></footer>
+        </form>}
+      </section></div>}
+      {playerOpen && <IpodPlayer onClose={() => setPlayerOpen(false)} selectedTrack={selectedTrack} playback={playback} playbackEnabled={playbackEnabled} />}
     </div>
   );
 }
@@ -366,8 +593,8 @@ function SectionTitle({ title, action, onAction }: { title: string; action?: str
   return <div className="section-title"><h2>{title}</h2>{action && <button onClick={onAction} type="button">{action}<Icon name="arrow-right" size={16} /></button>}</div>;
 }
 
-function TrackSection({ title, tracks, selectedTrackId, playback, onSelectTrack, onPlay, onAddToQueue, emptyCopy = "No matching tracks were found." }: { title: string; tracks: Track[]; selectedTrackId?: number; playback: PlaybackSnapshot; onSelectTrack: (track: Track) => void; onPlay: (track: Track) => void; onAddToQueue: (track: Track) => void; emptyCopy?: string }) {
-  return <section className="content-section track-section"><SectionTitle title={title} />{tracks.length ? <div className="track-list" role="list"><div className="track-header"><span>#</span><span>Track</span><span>Album</span><span>Time</span><span aria-hidden="true" /><span aria-hidden="true" /></div>{tracks.map((track, index) => <TrackRow key={track.id} track={track} index={index} selected={track.id === selectedTrackId} playback={playback} onSelect={onSelectTrack} onPlay={onPlay} onAddToQueue={onAddToQueue} />)}</div> : <EmptyState icon="music" title="No tracks to show" copy={emptyCopy} />}</section>;
+function TrackSection({ title, tracks, selectedTrackId, playback, playbackEnabled, onSelectTrack, onPlay, onAddToQueue, emptyCopy = "No matching tracks were found." }: { title: string; tracks: Track[]; selectedTrackId?: number; playback: PlaybackSnapshot; playbackEnabled: boolean; onSelectTrack: (track: Track) => void; onPlay: (track: Track) => void; onAddToQueue: (track: Track) => void; emptyCopy?: string }) {
+  return <section className="content-section track-section"><SectionTitle title={title} />{tracks.length ? <div className="track-list" role="list"><div className="track-header"><span>#</span><span>Track</span><span>Album</span><span>Time</span><span aria-hidden="true" /><span aria-hidden="true" /></div>{tracks.map((track, index) => <TrackRow key={track.id} track={track} index={index} selected={track.id === selectedTrackId} playback={playback} playbackEnabled={playbackEnabled} onSelect={onSelectTrack} onPlay={onPlay} onAddToQueue={onAddToQueue} />)}</div> : <EmptyState icon="music" title="No tracks to show" copy={emptyCopy} />}</section>;
 }
 
 function CollectionSection({ title, items, emptyTitle }: { title: string; items: { title: string; subtitle: string; shape?: "square" | "circle"; icon: IconName }[]; emptyTitle: string }) {

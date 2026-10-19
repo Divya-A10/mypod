@@ -1,0 +1,23 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "ios-audio-import",
+  "description": "Allows user-selected audio to be staged in MyPod's private library on iOS.",
+  "local": true,
+  "windows": ["main"],
+  "platforms": ["iOS"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "fs:allow-copy-file",
+    "fs:allow-mkdir",
+    "fs:allow-remove",
+    "fs:allow-stat",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$APPLOCALDATA/MyPod/Importing" },
+        { "path": "$APPLOCALDATA/MyPod/Importing/**" }
+      ]
+    }
+  ]
+}

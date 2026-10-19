@@ -24,17 +24,16 @@ The API binds to localhost by default. The health check is available at <http://
 
 ## Desktop and responsive UI
 
+For the complete startup instructions for the backend, browser frontend, macOS app, and iPhone Simulator, see [the development startup guide](docs/development-startup.md).
+
 With the backend running, start the React preview from `apps/desktop`:
 
 ```sh
-cd apps/desktop
-npm install
+cd /Users/divyaavanigadda/Desktop/mypod/apps/desktop
 npm run dev
 ```
 
-The responsive UI is available at <http://127.0.0.1:1420>. It uses the existing track-list API through a local development proxy. To launch the Tauri shell instead, run `npm run tauri -- dev` from `apps/desktop`; this requires the Rust/Cargo Tauri toolchain. The layout includes iPhone-sized navigation and a full-screen player view, but an iOS build and phone-to-computer API connection are not configured yet.
-
-The Now Playing surface and transport controls are visual UI only until myPod has a playback engine. Track, seek, volume, shuffle, repeat, playlist, favorites, and artwork controls are not connected to playback or persistent data.
+The responsive UI is available at <http://127.0.0.1:1420> and uses the track-list API through Vite's local development proxy. Desktop audio playback uses the shared playback controller and HTML media element. The iOS Simulator app has an on-device import/catalog path, while native iOS audio playback is not implemented yet.
 
 ## Local library configuration
 

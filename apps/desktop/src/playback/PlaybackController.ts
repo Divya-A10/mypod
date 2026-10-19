@@ -1,4 +1,34 @@
-import { getTrackAudioUrl, type Track } from "../api";
+import type { Track } from "../library/contracts";
+
+export type PlaybackDriverEventType =
+  | "loadstart"
+  | "metadata"
+  | "timeupdate"
+  | "playing"
+  | "waiting"
+  | "pause"
+  | "ended"
+  | "error";
+
+export type PlaybackDriverEvent = {
+  type: PlaybackDriverEventType;
+  currentTime: number;
+  duration: number;
+  paused: boolean;
+  unsupported: boolean;
+};
+
+/** Platform media operations consumed by the shared playback controller. */
+export interface PlaybackDriver {
+  readonly paused: boolean;
+  readonly currentTime: number;
+  readonly duration: number;
+  load(trackId: number): void;
+  play(): Promise<void>;
+  pause(): void;
+  seek(seconds: number): void;
+  subscribe(listener: (event: PlaybackDriverEvent) => void): () => void;
+}
 
 export type PlaybackPhase = "idle" | "loading" | "playing" | "paused" | "ended" | "error";
 
@@ -98,7 +128,7 @@ type StartIntent = StartRequest & { attempt: number };
 
 /** One media element and one observable state source for every player surface. */
 export class PlaybackController {
-  private readonly media: HTMLAudioElement;
+  private readonly driver: PlaybackDriver;
   private readonly queueModel: PlaybackQueue;
   private readonly listeners = new Set<Listener>();
   private playAttempt = 0;
@@ -114,20 +144,10 @@ export class PlaybackController {
     history: [],
   };
 
-  constructor(media: HTMLAudioElement = new Audio(), queueModel = new PlaybackQueue()) {
-    this.media = media;
+  constructor(driver: PlaybackDriver, queueModel = new PlaybackQueue()) {
+    this.driver = driver;
     this.queueModel = queueModel;
-    this.media.preload = "metadata";
-    this.media.addEventListener("loadstart", this.onLoadStart);
-    this.media.addEventListener("loadedmetadata", this.onMetadata);
-    this.media.addEventListener("timeupdate", this.onTimeUpdate);
-    this.media.addEventListener("durationchange", this.onMetadata);
-    this.media.addEventListener("playing", this.onPlaying);
-    this.media.addEventListener("waiting", this.onWaiting);
-    this.media.addEventListener("pause", this.onPause);
-    this.media.addEventListener("ended", this.onEnded);
-    this.media.addEventListener("error", this.onError);
-    this.media.addEventListener("seeked", this.onTimeUpdate);
+    this.driver.subscribe(this.onDriverEvent);
   }
 
   getSnapshot = (): PlaybackSnapshot => this.snapshot;
@@ -156,7 +176,7 @@ export class PlaybackController {
 
   play = async (track: Track): Promise<void> => {
     const sameTrack = this.snapshot.track?.id === track.id;
-    if (sameTrack && !this.media.paused) {
+    if (sameTrack && !this.driver.paused) {
       this.pause();
       return;
     }
@@ -165,7 +185,7 @@ export class PlaybackController {
     const intent = alreadyStarted
       ? { kind: "resume" as const, track }
       : { kind: "direct" as const, track, previouslyStarted: this.startedTrack };
-    const restart = this.snapshot.phase === "ended" || this.snapshot.phase === "error" || (this.media.duration > 0 && this.media.currentTime >= this.media.duration);
+    const restart = this.snapshot.phase === "ended" || this.snapshot.phase === "error" || (this.driver.duration > 0 && this.driver.currentTime >= this.driver.duration);
     await this.startTrack(track, intent, !sameTrack || !alreadyStarted || restart);
   };
 
@@ -209,8 +229,8 @@ export class PlaybackController {
   pause = (): void => {
     this.playAttempt += 1;
     this.startIntent = null;
-    this.media.pause();
-    if (this.media.paused && this.snapshot.track && this.snapshot.phase !== "ended") {
+    this.driver.pause();
+    if (this.driver.paused && this.snapshot.track && this.snapshot.phase !== "ended") {
       this.update({ phase: "paused" });
     }
   };
@@ -220,7 +240,7 @@ export class PlaybackController {
       this.pause();
       return;
     }
-    if (!this.media.paused) {
+    if (!this.driver.paused) {
       this.pause();
       return;
     }
@@ -229,25 +249,23 @@ export class PlaybackController {
   };
 
   seek = (seconds: number): void => {
-    if (!this.snapshot.track || !Number.isFinite(seconds) || !Number.isFinite(this.media.duration) || this.media.duration <= 0) return;
-    this.media.currentTime = Math.min(Math.max(seconds, 0), this.media.duration);
+    if (!this.snapshot.track || !Number.isFinite(seconds) || !Number.isFinite(this.driver.duration) || this.driver.duration <= 0) return;
+    this.driver.seek(Math.min(Math.max(seconds, 0), this.driver.duration));
   };
 
   private async startTrack(track: Track, intent: StartRequest, reload: boolean): Promise<void> {
     const attempt = ++this.playAttempt;
     this.startIntent = { ...intent, attempt } as StartIntent;
-    if (reload) {
-      this.media.pause();
-      this.snapshot = { ...this.snapshot, track, phase: "loading", currentTime: 0, duration: null, error: null };
-      this.emit();
-      this.media.src = getTrackAudioUrl(track.id);
-      this.media.load();
-    } else {
-      this.update({ track, phase: "loading", error: null });
-    }
-
     try {
-      await this.media.play();
+      if (reload) {
+        this.driver.pause();
+        this.snapshot = { ...this.snapshot, track, phase: "loading", currentTime: 0, duration: null, error: null };
+        this.emit();
+        this.driver.load(track.id);
+      } else {
+        this.update({ track, phase: "loading", error: null });
+      }
+      await this.driver.play();
       // The playing event, not the play() promise, commits queue and history state.
     } catch (reason) {
       if (attempt !== this.playAttempt || this.snapshot.track?.id !== track.id) return;
@@ -275,17 +293,30 @@ export class PlaybackController {
     for (const listener of this.listeners) listener(this.snapshot);
   }
 
+  private onDriverEvent = (event: PlaybackDriverEvent): void => {
+    switch (event.type) {
+      case "loadstart": this.onLoadStart(); break;
+      case "metadata": this.onMetadata(event); break;
+      case "timeupdate": this.onTimeUpdate(event); break;
+      case "playing": this.onPlaying(); break;
+      case "waiting": this.onWaiting(event); break;
+      case "pause": this.onPause(); break;
+      case "ended": this.onEnded(event); break;
+      case "error": this.onError(event); break;
+    }
+  };
+
   private onLoadStart = (): void => {
     if (this.snapshot.track && this.snapshot.phase !== "error") this.update({ phase: "loading" });
   };
 
-  private onMetadata = (): void => {
-    const duration = Number.isFinite(this.media.duration) ? this.media.duration : null;
-    this.update({ duration, currentTime: Number.isFinite(this.media.currentTime) ? this.media.currentTime : 0 });
+  private onMetadata = (event: PlaybackDriverEvent): void => {
+    const duration = Number.isFinite(event.duration) ? event.duration : null;
+    this.update({ duration, currentTime: Number.isFinite(event.currentTime) ? event.currentTime : 0 });
   };
 
-  private onTimeUpdate = (): void => {
-    this.update({ currentTime: Number.isFinite(this.media.currentTime) ? this.media.currentTime : 0 });
+  private onTimeUpdate = (event: PlaybackDriverEvent): void => {
+    this.update({ currentTime: Number.isFinite(event.currentTime) ? event.currentTime : 0 });
   };
 
   private onPlaying = (): void => {
@@ -314,8 +345,8 @@ export class PlaybackController {
     this.emit();
   };
 
-  private onWaiting = (): void => {
-    if (this.snapshot.track && !this.media.paused) this.update({ phase: "loading" });
+  private onWaiting = (event: PlaybackDriverEvent): void => {
+    if (this.snapshot.track && !event.paused) this.update({ phase: "loading" });
   };
 
   private onPause = (): void => {
@@ -324,24 +355,21 @@ export class PlaybackController {
     }
   };
 
-  private onEnded = (): void => {
+  private onEnded = (event: PlaybackDriverEvent): void => {
     if (!this.snapshot.track) return;
-    const duration = Number.isFinite(this.media.duration) ? this.media.duration : this.snapshot.duration;
-    this.update({ phase: "ended", currentTime: duration ?? this.media.currentTime, duration });
+    const duration = Number.isFinite(event.duration) ? event.duration : this.snapshot.duration;
+    this.update({ phase: "ended", currentTime: duration ?? event.currentTime, duration });
     if (this.queueModel.peekNext()) void this.next();
   };
 
-  private onError = (): void => {
+  private onError = (event: PlaybackDriverEvent): void => {
     if (!this.snapshot.track) return;
     this.startIntent = null;
-    const unsupported = this.media.error?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED;
     this.update({
       phase: "error",
-      error: unsupported
+      error: event.unsupported
         ? "This audio format is not supported by the current player."
         : "This track could not be loaded. Check that the local API and file are available.",
     });
   };
 }
-
-export const playbackController = new PlaybackController();

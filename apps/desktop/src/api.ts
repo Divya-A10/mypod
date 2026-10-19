@@ -1,29 +1,12 @@
-export type Track = {
-  id: number;
-  path: string;
-  storage_type: "external" | "managed";
-  title: string;
-  artist: string | null;
-  album: string | null;
-  duration: number | null;
-  format: string;
-  file_size: number;
-  modified_at: number;
-  created_at: string;
-  updated_at: string;
-  is_missing: number;
-};
+import { assertDesktopAdapterAvailable } from "./platform";
+import type { Track, TrackResponse } from "./library/contracts";
 
-type TrackResponse = {
-  items: Track[];
-  total: number;
-  limit: number;
-  offset: number;
-};
+export type { LibraryAdapter, Track, TrackResponse } from "./library/contracts";
 
 const apiBase = import.meta.env.DEV ? "/api" : "http://127.0.0.1:8000";
 
 export async function getTracks(offset = 0, signal?: AbortSignal): Promise<TrackResponse> {
+  assertDesktopAdapterAvailable();
   const response = await fetch(`${apiBase}/tracks?limit=100&offset=${offset}`, { signal });
   if (!response.ok) {
     throw new Error(`Library request failed (${response.status})`);
@@ -31,7 +14,20 @@ export async function getTracks(offset = 0, signal?: AbortSignal): Promise<Track
   return (await response.json()) as TrackResponse;
 }
 
+export async function getTrack(trackId: number, signal?: AbortSignal): Promise<Track> {
+  assertDesktopAdapterAvailable();
+  if (!Number.isSafeInteger(trackId) || trackId < 1) {
+    throw new Error("A valid library track ID is required");
+  }
+  const response = await fetch(`${apiBase}/tracks/${trackId}`, { signal });
+  if (!response.ok) {
+    throw new Error(`Track request failed (${response.status})`);
+  }
+  return (await response.json()) as Track;
+}
+
 export function getTrackAudioUrl(trackId: number): string {
+  assertDesktopAdapterAvailable();
   if (!Number.isSafeInteger(trackId) || trackId < 1) {
     throw new Error("A valid library track ID is required");
   }
