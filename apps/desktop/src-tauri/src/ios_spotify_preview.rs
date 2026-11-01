@@ -155,7 +155,9 @@ pub(crate) struct SpotifyCsvPreview {
 pub async fn preview_spotify_csv(
     app: tauri::AppHandle,
     import_id: String,
+    pending: tauri::State<'_, crate::ios_spotify_import::PendingImport>,
 ) -> Result<SpotifyCsvPreview, String> {
+    eprintln!("[MyPod CSV] native preview command invoked; token_valid=true");
     if !valid_import_id(&import_id) {
         return Err("Invalid temporary preview token".to_string());
     }
@@ -164,9 +166,23 @@ pub async fn preview_spotify_csv(
         .app_local_data_dir()
         .map_err(|error| error.to_string())?;
     let id = import_id.clone();
-    tauri::async_runtime::spawn_blocking(move || preview_staged_file(&app_data, &id))
-        .await
-        .map_err(|error| error.to_string())?
+    let preview_result =
+        tauri::async_runtime::spawn_blocking(move || preview_staged_file(&app_data, &id))
+            .await
+            .map_err(|error| error.to_string())?;
+    let preview = match preview_result {
+        Ok(preview) => preview,
+        Err(error) => {
+            eprintln!("[MyPod CSV] native preview failed; error={error}");
+            return Err(error);
+        }
+    };
+    eprintln!(
+        "[MyPod CSV] native preview parsed; complete={} source_records={} bytes_not_logged=true",
+        preview.complete, preview.summary.source_records
+    );
+    *pending.0.lock().map_err(|_| "Import preview is busy")? = Some((import_id, preview.clone()));
+    Ok(preview)
 }
 
 #[cfg(any(target_os = "ios", test))]
@@ -200,6 +216,10 @@ fn preview_staged_file(app_data: &Path, import_id: &str) -> Result<SpotifyCsvPre
         return Err("The selected CSV staging item is not a regular file".into());
     }
     let length = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+    eprintln!(
+        "[MyPod CSV] staged file readable; bytes={} path_redacted=true",
+        length
+    );
     if length > MAX_FILE_BYTES {
         return Ok(file_too_large(length));
     }
@@ -219,11 +239,19 @@ fn preview_staged_file(app_data: &Path, import_id: &str) -> Result<SpotifyCsvPre
         .take((MAX_FILE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
+    eprintln!(
+        "[MyPod CSV] staged bytes read; bytes={} path_redacted=true",
+        bytes.len()
+    );
     drop(file);
     drop(cleanup);
     if bytes.len() > MAX_FILE_BYTES {
         return Ok(file_too_large_unknown());
     }
+    eprintln!(
+        "[MyPod CSV] CSV parser invoked; bytes={} path_redacted=true",
+        bytes.len()
+    );
     Ok(parse_spotify_csv(&bytes))
 }
 

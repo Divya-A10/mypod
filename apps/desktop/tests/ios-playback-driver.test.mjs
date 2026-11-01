@@ -59,18 +59,56 @@ test("iOS driver reports playing only after native state confirms playback and n
   assert.equal(events.some(({ type }) => type === "ended"), false);
   await poll();
   assert.equal(events.some(({ type }) => type === "ended"), true);
-  assert.deepEqual(calls[0], { command: "play_local_track", args: { trackId: 12 } });
+  assert.deepEqual(calls[0], { command: "play_local_track", args: { trackId: 12, reload: true } });
   assert.equal(calls.some(({ args }) => args && Object.values(args).some((value) => typeof value === "string" && value.includes("/"))), false);
 });
 
-test("iOS driver propagates native command failures and native decode errors", async () => {
-  const failedCommand = new IosNativePlaybackDriver({
-    invoke: async (command) => { if (command === "play_local_track") throw new Error("missing track"); return nativeState(); },
-    setInterval,
-    clearInterval,
+test("iOS driver preserves reload intent after failure and reuses the player for resume", async () => {
+  const calls = [];
+  let rejectFirst = true;
+  const driver = new IosNativePlaybackDriver({
+    invoke: async (command, args) => {
+      calls.push({ command, args });
+      if (command === "play_local_track" && rejectFirst) {
+        rejectFirst = false;
+        throw new Error("native failure");
+      }
+      return nativeState({ playing: true });
+    },
+    setInterval: () => 1,
+    clearInterval: () => {},
   });
-  failedCommand.load(12);
-  await assert.rejects(failedCommand.play(), /missing track/);
+
+  driver.load(12);
+  await assert.rejects(driver.play(), /could not start this track/);
+  await driver.play();
+  await driver.play();
+
+  assert.deepEqual(calls.filter(({ command }) => command === "play_local_track").map(({ args }) => args), [
+    { trackId: 12, reload: true },
+    { trackId: 12, reload: true },
+    { trackId: 12, reload: false },
+  ]);
+});
+
+test("iOS driver reports native command failures safely and does not overstate media errors", async () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...values) => warnings.push(values.join(" "));
+  try {
+    const failedCommand = new IosNativePlaybackDriver({
+      invoke: async (command) => { if (command === "play_local_track") throw new Error("/private/path/Artist - Title.wav"); return nativeState(); },
+      setInterval,
+      clearInterval,
+    });
+    failedCommand.load(12);
+    await assert.rejects(failedCommand.play(), /could not start this track/);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /native play command failed/);
+  assert.doesNotMatch(warnings[0], /private|Artist|Title|wav/);
 
   const { driver, poll } = setup([nativeState({ error: "unsupported codec" })]);
   const events = [];
@@ -78,7 +116,7 @@ test("iOS driver propagates native command failures and native decode errors", a
   driver.load(12);
   await driver.play();
   await poll();
-  assert.equal(events.some(({ type, unsupported }) => type === "error" && unsupported), true);
+  assert.equal(events.some(({ type, unsupported }) => type === "error" && !unsupported), true);
 });
 
 test("iOS driver reports rejected pause and seek commands as media errors", async () => {

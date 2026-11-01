@@ -14,7 +14,7 @@ const { BaseDirectory } = await vite.ssrLoadModule("@tauri-apps/plugin-fs");
 after(async () => vite.close());
 
 function makeAdapter(overrides = {}) {
-  const calls = { invoke: [], open: [], copyFile: [], mkdir: [], remove: [], stat: [] };
+  const calls = { invoke: [], open: [], save: [], copyFile: [], mkdir: [], remove: [], stat: [], startScope: [], stopScope: [] };
   const dependencies = {
     invoke: async (...args) => {
       calls.invoke.push(args);
@@ -24,6 +24,10 @@ function makeAdapter(overrides = {}) {
       calls.open.push(options);
       return "file:///provider/Synthetic%20tone.wav";
     },
+    save: async (options) => {
+      calls.save.push(options);
+      return "file:///provider/MyPod-backup.mypodbackup";
+    },
     copyFile: async (...args) => calls.copyFile.push(args),
     mkdir: async (...args) => calls.mkdir.push(args),
     remove: async (...args) => calls.remove.push(args),
@@ -31,6 +35,8 @@ function makeAdapter(overrides = {}) {
       calls.stat.push(args);
       return { isFile: true, isSymlink: false, size: 44 };
     },
+    startAccessingSecurityScopedResource: async (...args) => calls.startScope.push(args),
+    stopAccessingSecurityScopedResource: async (...args) => calls.stopScope.push(args),
     randomId: () => "0123456789abcdef0123456789abcdef",
     ...overrides,
   };
@@ -81,13 +87,10 @@ test("iOS import rejects unsupported locations, unsupported files, and non-regul
   assert.equal(link.calls.copyFile.length, 0);
 });
 
-test("failed catalog registration removes the app-private partial copy", async () => {
+test("failed catalog registration preserves the app-private partial copy for recovery", async () => {
   const { adapter, calls } = makeAdapter({ invoke: async () => { throw new Error("catalog unavailable"); } });
   await assert.rejects(adapter.importAudio(), /catalog unavailable/);
-  assert.deepEqual(calls.remove[0], [
-    "MyPod/Importing/0123456789abcdef0123456789abcdef.part",
-    { baseDir: BaseDirectory.AppLocalData },
-  ]);
+  assert.equal(calls.remove.length, 0);
 });
 
 test("iOS playlist adapter uses native catalog commands and preserves entry identifiers", async () => {
@@ -112,4 +115,56 @@ test("iOS playlist adapter uses native catalog commands and preserves entry iden
     ["reorder_playlist_entries", { playlistId: 4, entryIds: [91, 87] }],
     ["delete_playlist", { playlistId: 4 }],
   ]);
+});
+
+test("backup export uses a generated token and preserves its app-private bundle on export failure", async () => {
+  const summary = { scope: "complete", schema_version: 5, file_count: 2, sha256: "a".repeat(64) };
+  const { adapter, calls } = makeAdapter({
+    invoke: async (...args) => { calls.invoke.push(args); return summary; },
+    copyFile: async (...args) => { calls.copyFile.push(args); throw new Error("destination unavailable"); },
+  });
+  const result = await adapter.backups.createBackup("complete");
+  assert.equal(result.status, "created");
+  assert.equal(result.token, "0123456789abcdef0123456789abcdef");
+  assert.match(result.exportError, /destination unavailable/);
+  assert.deepEqual(calls.invoke[0], ["create_local_backup", { token: result.token, scope: "complete" }]);
+  assert.equal(calls.copyFile[0][0], `MyPod/Backups/${result.token}.mypodbackup`);
+  assert.equal(calls.remove.length, 0, "the retained bundle remains available for retry");
+  assert.equal(calls.save.length, 1);
+});
+
+test("backup and restore cancellation do not call native catalog commands", async () => {
+  const { adapter, calls } = makeAdapter({
+    save: async () => null,
+    open: async () => null,
+  });
+  assert.deepEqual(await adapter.backups.createBackup("database_only"), { status: "cancelled" });
+  assert.deepEqual(await adapter.backups.inspectBackup(), { status: "cancelled" });
+  assert.equal(calls.invoke.length, 0);
+  assert.equal(calls.copyFile.length, 0);
+});
+
+test("retry export reports cancellation and keeps the app-private backup", async () => {
+  const { adapter, calls } = makeAdapter({ save: async () => null });
+  assert.equal(await adapter.backups.exportBackup("0123456789abcdef0123456789abcdef"), false);
+  assert.equal(calls.copyFile.length, 0);
+  assert.equal(calls.remove.length, 0);
+});
+
+test("restore review stages a Files selection and passes only a generated token to native code", async () => {
+  const summary = { scope: "database_only", schema_version: 5, file_count: 1, sha256: "b".repeat(64) };
+  const { adapter, calls } = makeAdapter({
+    invoke: async (...args) => { calls.invoke.push(args); return summary; },
+  });
+  const reviewed = await adapter.backups.inspectBackup();
+  assert.equal(reviewed.status, "ready");
+  assert.deepEqual(calls.invoke[0], ["inspect_local_backup", { token: reviewed.token }]);
+  assert.deepEqual(calls.copyFile[0], [
+    "file:///provider/Synthetic%20tone.wav",
+    `MyPod/Importing/backup-${reviewed.token}.part`,
+    { toPathBaseDir: BaseDirectory.AppLocalData },
+  ]);
+  await adapter.backups.restoreBackup(reviewed.token);
+  assert.deepEqual(calls.invoke[1], ["restore_local_backup", { token: reviewed.token, confirmed: true }]);
+  assert.ok(!JSON.stringify(calls.invoke).includes("/provider/"), "native commands never receive a user path");
 });

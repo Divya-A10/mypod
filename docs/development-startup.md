@@ -10,7 +10,7 @@ This guide covers the backend, browser-based frontend, desktop app, and the iOS 
 | macOS desktop app | Yes, for library data | Started by Tauri | Yes |
 | iPhone Simulator app | No; iOS uses its on-device catalog | Started by Tauri | Yes |
 
-The iOS build currently supports the on-device import/catalog work. Native iOS audio playback is not implemented, so starting the app does not mean its playback controls can play imported tracks. The simulator also does not need the Mac's FastAPI server for its on-device catalog.
+The iOS build supports on-device audio import/catalog, native AVPlayer playback, persistent playlists, confirmed Spotify CSV metadata import, and conservative audio matching. Metadata-only entries remain unplayable until associated with available local audio. The simulator also does not need the Mac's FastAPI server for its on-device catalog.
 
 ## One-time prerequisites
 
@@ -41,7 +41,7 @@ These are setup commands, not commands to repeat every time you start MyPod.
 Open Terminal window 1 and run:
 
 ```sh
-cd /Users/divyaavanigadda/Desktop/mypod
+cd ~/Desktop/mypod
 source .venv/bin/activate
 uvicorn app.main:app --app-dir backend --reload
 ```
@@ -59,7 +59,7 @@ The expected response is `{"status":"ok"}`. The backend binds to localhost. Libr
 Open Terminal window 2:
 
 ```sh
-cd /Users/divyaavanigadda/Desktop/mypod/apps/desktop
+cd ~/Desktop/mypod/apps/desktop
 npm run dev
 ```
 
@@ -70,7 +70,7 @@ Open <http://127.0.0.1:1420>. Vite proxies `/api` requests to the backend at `ht
 Keep the backend running in its own terminal. Open another terminal and run:
 
 ```sh
-cd /Users/divyaavanigadda/Desktop/mypod/apps/desktop
+cd ~/Desktop/mypod/apps/desktop
 npm run tauri -- dev
 ```
 
@@ -83,7 +83,7 @@ Tauri starts the Vite development server from the configured `beforeDevCommand`;
 3. Open a terminal and run:
 
    ```sh
-   cd /Users/divyaavanigadda/Desktop/mypod/apps/desktop
+   cd ~/Desktop/mypod/apps/desktop
    npm run tauri -- ios dev --no-watch "MyPod iPhone SE"
    ```
 
@@ -102,7 +102,7 @@ If Xcode reports a signing error, copy the complete error before changing signin
 The npm project is in `apps/desktop`, not at the repository root. Change into that folder before running npm commands:
 
 ```sh
-cd /Users/divyaavanigadda/Desktop/mypod/apps/desktop
+cd ~/Desktop/mypod/apps/desktop
 npm run dev
 ```
 

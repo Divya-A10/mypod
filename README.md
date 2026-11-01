@@ -1,6 +1,6 @@
 # myPod
 
-myPod (LocalPod) is a local-first music player and personal recommendation system. The backend indexes local audio into SQLite. A responsive React interface and Tauri desktop shell are in place as an initial UI pass. Playback, playlist and favorites APIs, artwork delivery, managed-file importing, and recommendation features are not implemented yet.
+myPod (LocalPod) is a local-first music player and personal recommendation system. The backend indexes local audio into SQLite. A responsive React interface and Tauri desktop shell are in place as an initial UI pass. Desktop playback APIs and managed iOS imports, native playback, playlists, Spotify metadata import, and conservative audio matching are implemented. Some recommendation and artwork features remain future work.
 
 ## Backend setup
 
@@ -29,11 +29,11 @@ For the complete startup instructions for the backend, browser frontend, macOS a
 With the backend running, start the React preview from `apps/desktop`:
 
 ```sh
-cd /Users/divyaavanigadda/Desktop/mypod/apps/desktop
+cd ~/Desktop/mypod/apps/desktop
 npm run dev
 ```
 
-The responsive UI is available at <http://127.0.0.1:1420> and uses the track-list API through Vite's local development proxy. Desktop audio playback uses the shared playback controller and HTML media element. The iOS Simulator app has an on-device import/catalog path, while native iOS audio playback is not implemented yet.
+The responsive UI is available at <http://127.0.0.1:1420> and uses the track-list API through Vite's local development proxy. Desktop audio playback uses the shared playback controller and HTML media element. The iOS Simulator app has an on-device import/catalog path, with native AVPlayer playback for locally imported audio.
 
 ## Local library configuration
 
@@ -77,3 +77,7 @@ Run the tests from the repository root. They use temporary folders and temporary
 ```sh
 python -m pytest
 ```
+
+## Spotify playlist import and audio matching (iPhone)
+
+Stage 3B metadata import and Stage 3C conservative local audio matching use the on-device catalog. See [the import and matching guide](docs/spotify-import-and-matching.md) for the confirmation workflow, grouping policy, migrations, test commands, and manual device checks. The desktop preview endpoint remains read-only.

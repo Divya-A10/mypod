@@ -20,6 +20,14 @@ export type TrackResponse = {
   offset: number;
 };
 
+export type FolderScanResult = {
+  imported: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  missing: number;
+};
+
 /** Playlist identity is its local catalog ID, never its display name. */
 export type Playlist = {
   id: number;
@@ -42,6 +50,7 @@ export type PlaylistEntry = {
   album: string | null;
   source_type_label: string | null;
   source_identifier: string | null;
+  catalog_id?: number | null;
 };
 
 export interface PlaylistLibraryAdapter {
@@ -55,18 +64,40 @@ export interface PlaylistLibraryAdapter {
   reorderEntries(playlistId: number, entryIds: number[]): Promise<PlaylistEntry[]>;
 }
 
+export type BackupScope = "database_only" | "complete";
+export type BackupSummary = {
+  format_version: number;
+  schema_version: number;
+  journal_mode: string;
+  scope: BackupScope;
+  file_count: number;
+  total_bytes: number;
+  sha256: string;
+};
+export interface BackupAdapter {
+  createBackup(scope: BackupScope): Promise<{ status: "cancelled" } | { status: "created"; token: string; summary: BackupSummary; exportError?: string }>;
+  exportBackup(token: string): Promise<boolean>;
+  inspectBackup(): Promise<{ status: "cancelled" } | { status: "ready"; token: string; summary: BackupSummary }>;
+  restoreBackup(token: string): Promise<BackupSummary>;
+}
+
 /** Platform-neutral library contract used by shared UI code. */
 export interface LibraryAdapter {
   listTracks(offset?: number, signal?: AbortSignal): Promise<TrackResponse>;
   getTrack(trackId: number, signal?: AbortSignal): Promise<Track>;
   importAudio?(): Promise<AudioImportResult>;
-  previewSpotifyCsv?(): Promise<SpotifyCsvPreviewResult>;
+  scanAudioFolder?(): Promise<{ status: "cancelled" } | { status: "scanned"; result: FolderScanResult }>;
+  previewSpotifyCsv?(file?: File): Promise<SpotifyCsvPreviewResult>;
+  listAudioMatchReview?(catalogId: number): Promise<AudioMatchReview[]>;
+  setAudioMatch?(catalogId: number, trackId: number | null): Promise<void>;
+  confirmSpotifyImport?(importId: string): Promise<{ already_imported: boolean; playlists: number; entries: number; preserved_other_rows: number }>;
+  backups?: BackupAdapter;
   playlists?: PlaylistLibraryAdapter;
 }
 
 export type AudioImportResult =
   | { status: "cancelled" }
-  | { status: "imported" | "duplicate"; track: Track };
+  | { status: "imported" | "duplicate"; track: Track; metadataWarning?: string | null };
 
 export type SpotifyCsvIssue = {
   code: string;
@@ -131,4 +162,12 @@ export type SpotifyCsvPreview = {
 
 export type SpotifyCsvPreviewResult =
   | { status: "cancelled" }
-  | { status: "previewed"; preview: SpotifyCsvPreview };
+  | { status: "previewed"; preview: SpotifyCsvPreview; importId?: string };
+
+export type AudioMatchReview = {
+  catalog_id: number; title: string; artist: string | null; album: string | null;
+  track_id: number | null; method: string | null; available: boolean;
+  candidates: Array<{ track_id: number; title: string; artist: string | null; album: string | null; reason: string; available: boolean }>;
+};
+
+export type IosRuntimeDiagnostics = { bridge_works: boolean; native_build_id: string; database_schema_version: number | null; migration_status: string; csv_selection_returned_path: boolean; selected_file_exists: boolean | null; staging_succeeded: boolean; preview_succeeded: boolean; failure_stage: string; sanitized_error: string | null; };

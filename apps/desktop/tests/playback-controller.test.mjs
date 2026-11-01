@@ -237,6 +237,16 @@ test("rejected or failed queued playback remains available for retry", async () 
   assert.deepEqual(controller.getSnapshot().queue, []);
 });
 
+test("playback errors retain safe platform-specific messages", async () => {
+  const { media, controller } = setup();
+  media.rejectNextPlay = new Error("The iPhone could not start this track.");
+
+  await controller.play(track(22));
+
+  assert.equal(controller.getSnapshot().phase, "error");
+  assert.equal(controller.getSnapshot().error, "The iPhone could not start this track.");
+});
+
 test("a media error leaves the queued item pending and retryable", async () => {
   const { media, controller } = setup();
   controller.enqueue(track(25));

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-library-scan",
+  "description": "Allows choosing one folder for a manual scan through the configured permitted-root scanner.",
+  "local": true,
+  "windows": ["main"],
+  "platforms": ["macOS", "windows", "linux"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open"
+  ]
+}

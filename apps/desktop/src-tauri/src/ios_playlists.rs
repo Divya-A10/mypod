@@ -30,6 +30,7 @@ pub struct PlaylistEntry {
     pub album: Option<String>,
     pub source_type_label: Option<String>,
     pub source_identifier: Option<String>,
+    pub catalog_id: Option<i64>,
 }
 
 #[cfg(target_os = "ios")]
@@ -286,20 +287,36 @@ pub(crate) fn list_entries_at(
     ensure_playlist(&connection, playlist_id)?;
     let mut statement = connection
         .prepare(
-            "SELECT e.id, e.playlist_id, e.position, e.track_id,
-                    COALESCE(t.title, e.title_snapshot),
+            "SELECT e.id, e.playlist_id, e.position, COALESCE(m.track_id, e.track_id),
+                    CASE WHEN e.catalog_id IS NOT NULL THEN e.title_snapshot ELSE COALESCE(t.title, e.title_snapshot) END,
                     e.artist_snapshot,
                     e.album_snapshot,
-                    e.source_type_label, e.source_identifier
-             FROM playlist_entries e LEFT JOIN imported_tracks t ON t.id = e.track_id
+                    e.source_type_label, e.source_identifier, e.catalog_id
+             FROM playlist_entries e LEFT JOIN audio_matches m ON m.catalog_id=e.catalog_id LEFT JOIN imported_tracks t ON t.id = COALESCE(m.track_id,e.track_id)
              WHERE e.playlist_id = ?1 ORDER BY e.position",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([playlist_id], row_to_entry)
         .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+    let mut entries = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    for entry in &mut entries {
+        if let Some(id) = entry.track_id {
+            let relative: String = connection
+                .query_row(
+                    "SELECT relative_path FROM imported_tracks WHERE id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if !crate::ios_catalog::managed_file_exists(&root, &relative) {
+                entry.track_id = None;
+            }
+        }
+    }
+    Ok(entries)
 }
 
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaylistEntry> {
@@ -313,6 +330,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaylistEntry> {
         album: row.get(6)?,
         source_type_label: row.get(7)?,
         source_identifier: row.get(8)?,
+        catalog_id: row.get(9)?,
     })
 }
 
@@ -368,8 +386,8 @@ fn get_entry_at(root: &Path, playlist_id: i64, entry_id: i64) -> Result<Playlist
     connection
         .query_row(
             "SELECT e.id, e.playlist_id, e.position, e.track_id,
-                    COALESCE(t.title, e.title_snapshot), e.artist_snapshot,
-                    e.album_snapshot, e.source_type_label, e.source_identifier
+                    CASE WHEN e.catalog_id IS NOT NULL THEN e.title_snapshot ELSE COALESCE(t.title, e.title_snapshot) END, e.artist_snapshot,
+                    e.album_snapshot, e.source_type_label, e.source_identifier, e.catalog_id
              FROM playlist_entries e LEFT JOIN imported_tracks t ON t.id = e.track_id
              WHERE e.playlist_id = ?1 AND e.id = ?2",
             params![playlist_id, entry_id],
@@ -593,7 +611,7 @@ mod tests {
         let version: i64 = migrated
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 5);
         let foreign_keys: i64 = migrated
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
             .unwrap();

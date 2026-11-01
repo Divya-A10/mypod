@@ -23,6 +23,7 @@ const defaults: Dependencies = { invoke, setInterval, clearInterval };
 export class IosNativePlaybackDriver implements PlaybackDriver {
   private readonly listeners = new Set<(event: PlaybackDriverEvent) => void>();
   private trackId: number | null = null;
+  private reloadRequested = false;
   private snapshot: NativePlaybackSnapshot | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
@@ -36,6 +37,7 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
   load(trackId: number): void {
     this.stopPolling();
     this.trackId = trackId;
+    this.reloadRequested = true;
     this.snapshot = null;
     this.emit("loadstart");
   }
@@ -44,7 +46,17 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
     if (!this.trackId || !Number.isSafeInteger(this.trackId) || this.trackId < 1) {
       throw new Error("A valid library track ID is required");
     }
-    await this.dependencies.invoke<void>("play_local_track", { trackId: this.trackId });
+    console.debug("MyPod iOS playback: dispatching native play command");
+    try {
+      await this.dependencies.invoke<void>("play_local_track", {
+        trackId: this.trackId,
+        reload: this.reloadRequested,
+      });
+      this.reloadRequested = false;
+    } catch {
+      console.warn("MyPod iOS playback: native play command failed");
+      throw new Error("The iPhone could not start this track.");
+    }
     this.startPolling();
     await this.poll();
   }
@@ -52,14 +64,20 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
   pause(): void {
     void this.dependencies.invoke<void>("pause_local_playback")
       .then(() => this.startPolling())
-      .catch(() => this.fail("Native playback could not be paused."));
+      .catch(() => {
+        console.warn("MyPod iOS playback: native pause command failed");
+        this.fail("Native playback could not be paused.");
+      });
   }
 
   seek(seconds: number): void {
     if (!Number.isFinite(seconds) || seconds < 0) return;
     void this.dependencies.invoke<void>("seek_local_playback", { seconds })
       .then(() => this.poll())
-      .catch(() => this.fail("Native playback could not seek to that position."));
+      .catch(() => {
+        console.warn("MyPod iOS playback: native seek command failed");
+        this.fail("Native playback could not seek to that position.");
+      });
   }
 
   subscribe(listener: (event: PlaybackDriverEvent) => void): () => void {
@@ -91,7 +109,8 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
       if (next.duration !== previous?.duration) this.emit("metadata");
       if (next.current_time !== previous?.current_time) this.emit("timeupdate");
       if (next.error && !previous?.error) {
-        this.emit("error", true);
+        // AVPlayer failure alone does not prove that the codec is unsupported.
+        this.emit("error");
         this.stopPolling();
       } else if (next.ended && !previous?.ended) {
         this.emit("ended");
@@ -104,6 +123,7 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
         this.emit("waiting");
       }
     } catch {
+      console.warn("MyPod iOS playback: native state query failed");
       this.fail("Native playback state is unavailable.");
     } finally {
       this.polling = false;

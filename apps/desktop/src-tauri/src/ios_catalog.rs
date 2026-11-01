@@ -13,17 +13,8 @@ const APP_FOLDER: &str = "MyPod";
 const MEDIA_FOLDER: &str = "Media";
 const STAGING_FOLDER: &str = "Importing";
 const DATABASE_FILE: &str = "library.sqlite3";
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 5;
 const MAX_AUDIO_BYTES: u64 = 1_073_741_824;
-const STALE_IMPORT_AGE_SECONDS: u64 = 24 * 60 * 60;
-
-struct StagedCleanup(PathBuf);
-
-impl Drop for StagedCleanup {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CatalogTrack {
@@ -44,6 +35,7 @@ pub struct CatalogTrack {
 pub struct ImportTrackResult {
     pub track: CatalogTrack,
     pub duplicate: bool,
+    pub metadata_warning: Option<String>,
 }
 
 #[cfg(target_os = "ios")]
@@ -231,6 +223,54 @@ pub(crate) fn open_catalog(root: &Path) -> Result<Connection, String> {
             )
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
+        version = 2;
+    }
+    if version <= 2 {
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        tx.execute_batch("CREATE TABLE spotify_imports (id INTEGER PRIMARY KEY, source_digest TEXT NOT NULL UNIQUE, row_count INTEGER NOT NULL);
+          CREATE TABLE catalog_tracks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, artist TEXT, album TEXT, spotify_id TEXT, isrc TEXT);
+          CREATE TABLE spotify_rows (batch_id INTEGER NOT NULL REFERENCES spotify_imports(id), source_record INTEGER NOT NULL, line_start INTEGER NOT NULL, line_end INTEGER NOT NULL, source_type TEXT, playlist_label TEXT, catalog_id INTEGER REFERENCES catalog_tracks(id), entry_id INTEGER REFERENCES playlist_entries(id) ON DELETE SET NULL, source_cells TEXT NOT NULL, PRIMARY KEY(batch_id, source_record));
+          ALTER TABLE playlist_entries ADD COLUMN catalog_id INTEGER REFERENCES catalog_tracks(id);
+          PRAGMA user_version = 3;").map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        version = 3;
+    }
+    if version <= 3 {
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        tx.execute_batch("CREATE TABLE audio_metadata(track_id INTEGER PRIMARY KEY REFERENCES imported_tracks(id),title TEXT,artist TEXT,album TEXT,isrc TEXT,read_error TEXT);
+          CREATE TABLE audio_matches(catalog_id INTEGER PRIMARY KEY REFERENCES catalog_tracks(id),track_id INTEGER NOT NULL REFERENCES imported_tracks(id),method TEXT NOT NULL CHECK(method IN ('automatic','manual')));
+          CREATE TABLE match_suppressions(catalog_id INTEGER PRIMARY KEY REFERENCES catalog_tracks(id));
+          PRAGMA user_version=4;").map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        version = 4;
+    }
+    if version <= 4 {
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let has_local_identifier: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('catalog_tracks') WHERE name='local_identifier')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !has_local_identifier {
+            tx.execute_batch("ALTER TABLE catalog_tracks ADD COLUMN local_identifier TEXT;")
+                .map_err(|e| e.to_string())?;
+        }
+        tx.execute_batch(
+            "UPDATE catalog_tracks SET local_identifier = 'spotify-' || id WHERE local_identifier IS NULL;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_tracks_local_identifier
+                ON catalog_tracks(local_identifier) WHERE local_identifier IS NOT NULL;
+             PRAGMA user_version=5;",
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
     Ok(connection)
 }
@@ -240,7 +280,13 @@ pub(crate) fn list_tracks_at(app_local_data: &Path, offset: usize) -> Result<Tra
     let media_dir = ensure_child_dir(&root, MEDIA_FOLDER)?;
     let staging_dir = ensure_child_dir(&root, STAGING_FOLDER)?;
     let connection = open_catalog(&root)?;
-    cleanup_orphans(&connection, &media_dir, &staging_dir)?;
+    let report = report_orphans(&connection, &media_dir, &staging_dir)?;
+    if report.staged_files > 0 || report.unreferenced_media_files > 0 {
+        eprintln!(
+            "MyPod retained files for review: {} staged/partial file(s), {} unreferenced managed media file(s)",
+            report.staged_files, report.unreferenced_media_files
+        );
+    }
     let total: i64 = connection
         .query_row("SELECT COUNT(*) FROM imported_tracks", [], |row| row.get(0))
         .map_err(|error| error.to_string())?;
@@ -259,9 +305,10 @@ pub(crate) fn list_tracks_at(app_local_data: &Path, offset: usize) -> Result<Tra
         .into_iter()
         .map(|(mut track, relative_path)| {
             track.is_missing = i64::from(!managed_file_exists(&root, &relative_path));
-            track
+            apply_embedded_metadata(&connection, &mut track)?;
+            Ok(track)
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(TrackPage {
         items,
         total: usize::try_from(total).unwrap_or(usize::MAX),
@@ -287,7 +334,33 @@ fn get_track_at(app_local_data: &Path, track_id: i64) -> Result<CatalogTrack, St
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Track not found".to_string())?;
     track.is_missing = i64::from(!managed_file_exists(&root, &relative_path));
+    apply_embedded_metadata(&connection, &mut track)?;
     Ok(track)
+}
+
+fn apply_embedded_metadata(db: &Connection, track: &mut CatalogTrack) -> Result<(), String> {
+    let metadata = db
+        .query_row(
+            "SELECT title,artist,album FROM audio_metadata WHERE track_id=?1",
+            [track.id],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some((title, artist, album)) = metadata {
+        if let Some(title) = title.filter(|v| !v.trim().is_empty()) {
+            track.title = title;
+        }
+        track.artist = artist;
+        track.album = album;
+    }
+    Ok(())
 }
 
 pub fn resolve_track_audio_path_at(
@@ -345,7 +418,6 @@ pub(crate) fn register_import_at(
     let media_dir = ensure_child_dir(&root, MEDIA_FOLDER)?;
     let staged = staging_dir.join(format!("{import_id}.part"));
     reject_symlink(&staged)?;
-    let _staged_cleanup = StagedCleanup(staged.clone());
     let metadata =
         fs::metadata(&staged).map_err(|_| "The selected file could not be copied".to_string())?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_AUDIO_BYTES {
@@ -354,6 +426,7 @@ pub(crate) fn register_import_at(
     if !matches_audio_header(&staged, &extension)? {
         return Err("The selected file does not match a supported audio format".to_string());
     }
+    let audio_metadata = crate::ios_audio_matching::read_metadata(&staged);
     let content_hash = sha256_file(&staged)?;
     let timestamp =
         i64::try_from(now_seconds()?).map_err(|_| "System time is out of range".to_string())?;
@@ -382,8 +455,8 @@ pub(crate) fn register_import_at(
         .optional()
         .map_err(|error| error.to_string())?
     {
-        transaction.commit().map_err(|error| error.to_string())?;
         let (mut track, relative) = existing;
+        transaction.commit().map_err(|error| error.to_string())?;
         if !managed_file_exists(&root, &relative) {
             let leaf = Path::new(&relative).file_name().ok_or_else(|| "Invalid catalog media path".to_string())?;
             fs::rename(&staged, media_dir.join(leaf)).map_err(|error| error.to_string())?;
@@ -391,7 +464,13 @@ pub(crate) fn register_import_at(
         } else {
             fs::remove_file(&staged).map_err(|error| error.to_string())?;
         }
-        return Ok(ImportTrackResult { track, duplicate: true });
+        let tx = connection.transaction().map_err(|e|e.to_string())?;
+        let has_metadata: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM audio_metadata WHERE track_id=?1)", [track.id], |r|r.get(0)).map_err(|e|e.to_string())?;
+        if !has_metadata { crate::ios_audio_matching::save_metadata(&tx, track.id, &audio_metadata)?; }
+        crate::ios_audio_matching::auto_match(&tx, &root)?;
+        tx.commit().map_err(|e|e.to_string())?;
+        apply_embedded_metadata(&connection, &mut track)?;
+        return Ok(ImportTrackResult { track, duplicate: true, metadata_warning: audio_metadata.error });
     }
 
     fs::rename(&staged, &final_path).map_err(|error| error.to_string())?;
@@ -411,14 +490,16 @@ pub(crate) fn register_import_at(
     );
     if let Err(error) = insert_result {
         drop(transaction);
-        let _ = fs::remove_file(&final_path);
         return Err(error.to_string());
     }
     let id = transaction.last_insert_rowid();
-    transaction.commit().map_err(|error| {
-        let _ = fs::remove_file(&final_path);
-        error.to_string()
-    })?;
+    let matching = crate::ios_audio_matching::save_metadata(&transaction, id, &audio_metadata)
+        .and_then(|_| crate::ios_audio_matching::auto_match(&transaction, &root));
+    if let Err(error) = matching {
+        drop(transaction);
+        return Err(error);
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(ImportTrackResult {
         track: CatalogTrack {
             id,
@@ -434,23 +515,30 @@ pub(crate) fn register_import_at(
             is_missing: 0,
         },
         duplicate: false,
+        metadata_warning: audio_metadata.error,
     })
 }
 
-fn cleanup_orphans(
-    connection: &Connection,
-    media_dir: &Path,
-    staging_dir: &Path,
-) -> Result<(), String> {
-    cleanup_orphans_at(connection, media_dir, staging_dir, now_seconds()?)
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OrphanReport {
+    staged_files: usize,
+    unreferenced_media_files: usize,
 }
 
-fn cleanup_orphans_at(
+fn report_orphans(
     connection: &Connection,
     media_dir: &Path,
     staging_dir: &Path,
-    now: u64,
-) -> Result<(), String> {
+) -> Result<OrphanReport, String> {
+    report_orphans_at(connection, media_dir, staging_dir)
+}
+
+fn report_orphans_at(
+    connection: &Connection,
+    media_dir: &Path,
+    staging_dir: &Path,
+) -> Result<OrphanReport, String> {
+    let mut report = OrphanReport::default();
     let mut referenced = std::collections::HashSet::new();
     let mut statement = connection
         .prepare("SELECT relative_path FROM imported_tracks")
@@ -466,18 +554,8 @@ fn cleanup_orphans_at(
         let path = entry.path();
         reject_symlink(&path)?;
         let metadata = entry.metadata().map_err(|error| error.to_string())?;
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs())
-            .unwrap_or(now);
-        let age = now.saturating_sub(modified);
-        if metadata.is_file()
-            && path.extension().is_some_and(|ext| ext == "part")
-            && age >= STALE_IMPORT_AGE_SECONDS
-        {
-            fs::remove_file(path).map_err(|error| error.to_string())?;
+        if metadata.is_file() && path.extension().is_some_and(|ext| ext == "part") {
+            report.staged_files += 1;
         }
     }
     for entry in fs::read_dir(media_dir).map_err(|error| error.to_string())? {
@@ -493,10 +571,10 @@ fn cleanup_orphans_at(
         }
         let relative = format!("{MEDIA_FOLDER}/{}", entry.file_name().to_string_lossy());
         if !referenced.contains(&relative) {
-            fs::remove_file(path).map_err(|error| error.to_string())?;
+            report.unreferenced_media_files += 1;
         }
     }
-    Ok(())
+    Ok(report)
 }
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<(CatalogTrack, String)> {
@@ -526,7 +604,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<(CatalogTrack, Str
     ))
 }
 
-fn managed_file_exists(root: &Path, relative: &str) -> bool {
+pub(crate) fn managed_file_exists(root: &Path, relative: &str) -> bool {
     let path = Path::new(relative);
     let mut components = path.components();
     if components
@@ -688,6 +766,152 @@ mod tests {
     }
 
     #[test]
+    fn migrates_populated_v2_catalog_to_v5_without_losing_rows() {
+        let base = temp_root("catalog-migrate-v2");
+        let root = app_root(&base).unwrap();
+        let db = root.join(DATABASE_FILE);
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE imported_tracks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+                    original_name TEXT NOT NULL, extension TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE, content_sha256 TEXT NOT NULL UNIQUE,
+                    file_size INTEGER NOT NULL CHECK(file_size > 0), imported_at INTEGER NOT NULL
+                );
+                CREATE TABLE playlists (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                    source_playlist_label TEXT, source_playlist_identifier TEXT
+                );
+                CREATE TABLE playlist_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL, track_id INTEGER REFERENCES imported_tracks(id) ON DELETE SET NULL,
+                    title_snapshot TEXT NOT NULL, artist_snapshot TEXT, album_snapshot TEXT,
+                    source_type_label TEXT, source_identifier TEXT, UNIQUE(playlist_id, position)
+                );
+                INSERT INTO imported_tracks VALUES (1,'Keep me','keep.wav','wav','Media/keep.wav','hash',4,1);
+                INSERT INTO playlists VALUES (1,'Existing playlist',1,1,'Existing playlist','existing');
+                INSERT INTO playlist_entries (playlist_id,position,track_id,title_snapshot) VALUES (1,0,1,'Keep me');
+                PRAGMA user_version=2;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let migrated = open_catalog(&root).unwrap();
+        let version: i64 = migrated
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+        for table in [
+            "spotify_imports",
+            "catalog_tracks",
+            "spotify_rows",
+            "audio_metadata",
+            "audio_matches",
+            "match_suppressions",
+        ] {
+            let found: i64 = migrated
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "missing migrated table {table}");
+        }
+        assert_eq!(
+            migrated
+                .query_row("SELECT COUNT(*) FROM imported_tracks", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            migrated
+                .query_row("SELECT COUNT(*) FROM playlists", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            migrated
+                .query_row("SELECT COUNT(*) FROM playlist_entries", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn initializes_a_fresh_catalog_at_v5_with_local_identifiers() {
+        let base = temp_root("catalog-fresh-v5");
+        let root = app_root(&base).unwrap();
+        let connection = open_catalog(&root).unwrap();
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let has_column: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('catalog_tracks') WHERE name='local_identifier'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 5);
+        assert_eq!(has_column, 1);
+        drop(connection);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn upgrades_a_populated_v4_catalog_and_preserves_existing_metadata() {
+        let base = temp_root("catalog-v4-to-v5");
+        let root = app_root(&base).unwrap();
+        let database = root.join(DATABASE_FILE);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE catalog_tracks (
+                    id INTEGER PRIMARY KEY, title TEXT NOT NULL, artist TEXT,
+                    album TEXT, spotify_id TEXT, isrc TEXT
+                );
+                INSERT INTO catalog_tracks(id,title,artist,album,spotify_id,isrc)
+                    VALUES (42,'Keep this recording','Test artist','Test album','opaque-id','TEST00000001');
+                PRAGMA user_version=4;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let migrated = open_catalog(&root).unwrap();
+        let row: (String, String, String, String, String, String) = migrated
+            .query_row(
+                "SELECT title,artist,album,spotify_id,isrc,local_identifier FROM catalog_tracks WHERE id=42",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .unwrap();
+        let version: i64 = migrated
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+        assert_eq!(
+            row,
+            (
+                "Keep this recording".into(),
+                "Test artist".into(),
+                "Test album".into(),
+                "opaque-id".into(),
+                "TEST00000001".into(),
+                "spotify-42".into()
+            )
+        );
+        drop(migrated);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn audio_path_resolution_rejects_unknown_missing_and_escaped_catalog_paths() {
         let base = temp_root("catalog-audio-path");
         let root = app_root(&base).unwrap();
@@ -767,8 +991,8 @@ mod tests {
     }
 
     #[test]
-    fn removes_staged_copy_when_catalog_open_fails() {
-        let base = temp_root("catalog-failure-cleanup");
+    fn preserves_staged_copy_when_catalog_open_fails() {
+        let base = temp_root("catalog-failure-preserve");
         let root = app_root(&base).unwrap();
         let staging = ensure_child_dir(&root, STAGING_FOLDER).unwrap();
         let token = "55555555555555555555555555555555";
@@ -776,7 +1000,7 @@ mod tests {
         fs::create_dir(root.join(DATABASE_FILE)).unwrap();
 
         assert!(register_import_at(&base, token, "tone.wav", "wav").is_err());
-        assert!(!staging.join(format!("{token}.part")).exists());
+        assert!(staging.join(format!("{token}.part")).is_file());
         let _ = fs::remove_dir_all(base);
     }
 
@@ -798,12 +1022,12 @@ mod tests {
         assert!(register_import_at(&base, token, "large.wav", "wav")
             .unwrap_err()
             .contains("1 GiB"));
-        assert!(!staged.exists());
+        assert!(staged.is_file());
         let _ = fs::remove_dir_all(base);
     }
 
     #[test]
-    fn cleans_stale_partial_and_unreferenced_managed_files() {
+    fn reports_interrupted_partials_and_unreferenced_media_without_deleting_them() {
         let base = temp_root("catalog-orphans");
         let root = app_root(&base).unwrap();
         let staging = ensure_child_dir(&root, STAGING_FOLDER).unwrap();
@@ -813,15 +1037,72 @@ mod tests {
         let orphan = media.join("unregistered.wav");
         synthetic_wav(&orphan);
         let connection = open_catalog(&root).unwrap();
-        cleanup_orphans_at(
-            &connection,
-            &media,
-            &staging,
-            now_seconds().unwrap() + STALE_IMPORT_AGE_SECONDS + 5,
-        )
-        .unwrap();
-        assert!(!partial.exists());
-        assert!(!orphan.exists());
+        let report = report_orphans_at(&connection, &media, &staging).unwrap();
+        assert_eq!(report.staged_files, 1);
+        assert_eq!(report.unreferenced_media_files, 1);
+        assert!(partial.exists());
+        assert!(orphan.exists());
+        let _page = list_tracks_at(&base, 0).unwrap();
+        assert!(partial.exists());
+        assert!(orphan.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn failed_catalog_write_preserves_existing_and_newly_staged_media() {
+        let base = temp_root("catalog-write-failure-preserve");
+        let root = app_root(&base).unwrap();
+        let staging = ensure_child_dir(&root, STAGING_FOLDER).unwrap();
+        let media = ensure_child_dir(&root, MEDIA_FOLDER).unwrap();
+        let existing_token = "77777777777777777777777777777777";
+        synthetic_wav(&staging.join(format!("{existing_token}.part")));
+        let existing = register_import_at(&base, existing_token, "existing.wav", "wav").unwrap();
+        let existing_path = media.join(format!("{existing_token}.wav"));
+
+        let failed_token = "88888888888888888888888888888888";
+        let failed_stage = staging.join(format!("{failed_token}.part"));
+        synthetic_wav(&failed_stage);
+        let mut distinct_audio = fs::read(&failed_stage).unwrap();
+        *distinct_audio.last_mut().unwrap() = 1;
+        fs::write(&failed_stage, distinct_audio).unwrap();
+        let connection = open_catalog(&root).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_synthetic_import BEFORE INSERT ON imported_tracks
+             BEGIN SELECT RAISE(ABORT, 'synthetic catalog write failure'); END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(register_import_at(&base, failed_token, "failed.wav", "wav")
+            .unwrap_err()
+            .contains("synthetic catalog write failure"));
+        let failed_path = media.join(format!("{failed_token}.wav"));
+        assert!(
+            existing_path.is_file(),
+            "previously imported media must remain"
+        );
+        assert!(
+            failed_path.is_file(),
+            "failed transaction media must remain for recovery"
+        );
+        assert!(
+            !failed_stage.exists(),
+            "the staged file was atomically moved to managed media"
+        );
+
+        let connection = open_catalog(&root).unwrap();
+        let report = report_orphans_at(&connection, &media, &staging).unwrap();
+        assert_eq!(report.unreferenced_media_files, 1);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM imported_tracks", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "the failed insert must not create a catalog row"
+        );
+        assert_eq!(existing.track.title, "existing");
         let _ = fs::remove_dir_all(base);
     }
 }

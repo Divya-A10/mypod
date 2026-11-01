@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type ChangeEvent } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { formatDuration, type Track } from "./api";
 import { libraryAdapter } from "./library/libraryAdapter";
-import type { Playlist, PlaylistEntry, SpotifyCsvPreview } from "./library/contracts";
+import { isIOSPlatform } from "./platform";
+import type { AudioMatchReview, BackupScope, BackupSummary, IosRuntimeDiagnostics, Playlist, PlaylistEntry, SpotifyCsvPreview } from "./library/contracts";
 import type { PlaybackSnapshot } from "./playback/PlaybackController";
 import { playbackAvailable, playbackController } from "./playback/runtime";
 
@@ -210,9 +212,20 @@ function App() {
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const [spotifyPreview, setSpotifyPreview] = useState<SpotifyCsvPreview | null>(null);
+  const [matchReview, setMatchReview] = useState<AudioMatchReview | null>(null);
+  const [matchTrackId, setMatchTrackId] = useState("");
+  const [matchBusy, setMatchBusy] = useState(false);
+  const [spotifyImportId, setSpotifyImportId] = useState<string | null>(null);
+  const [spotifyImporting, setSpotifyImporting] = useState(false);
   const [spotifyPreviewPage, setSpotifyPreviewPage] = useState(0);
   const [previewingSpotifyCsv, setPreviewingSpotifyCsv] = useState(false);
   const [spotifyPreviewMessage, setSpotifyPreviewMessage] = useState<string | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMessage, setBackupMessage] = useState<string | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const [pendingBackupExport, setPendingBackupExport] = useState<{ token: string; summary: BackupSummary } | null>(null);
+  const [pendingBackupRestore, setPendingBackupRestore] = useState<{ token: string; summary: BackupSummary } | null>(null);
+  const [iosDiagnostics, setIosDiagnostics] = useState<IosRuntimeDiagnostics | null>(null);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [activePlaylistId, setActivePlaylistId] = useState<number | null>(null);
   const [playlistEntries, setPlaylistEntries] = useState<PlaylistEntry[]>([]);
@@ -221,6 +234,13 @@ function App() {
   const [playlistDialog, setPlaylistDialog] = useState<"create" | "rename" | "add" | "delete" | null>(null);
   const [playlistName, setPlaylistName] = useState("");
   const playlistAdapter = libraryAdapter.playlists;
+  const csvInput = useRef<HTMLInputElement>(null);
+  const browserAudioInput = useRef<HTMLInputElement>(null);
+  const browserAudioFolderInput = useRef<HTMLInputElement>(null);
+  const iosRuntime = typeof navigator !== "undefined" && isIOSPlatform(navigator);
+  const tauriRuntime = isTauri();
+  const localAudioScanAvailable = Boolean(libraryAdapter.scanAudioFolder);
+  const browserFolderPickerAvailable = typeof document !== "undefined" && "webkitdirectory" in document.createElement("input");
 
   const refreshPlaylists = async () => {
     if (!playlistAdapter) return;
@@ -274,6 +294,8 @@ function App() {
       setLoadingMore(false);
     }
   };
+
+  useEffect(() => { const listener = (event: Event) => setIosDiagnostics((event as CustomEvent<IosRuntimeDiagnostics>).detail); window.addEventListener("mypod:ios-diagnostics", listener); return () => window.removeEventListener("mypod:ios-diagnostics", listener); }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -386,14 +408,24 @@ function App() {
   };
 
   const importAudio = async () => {
-    if (!libraryAdapter.importAudio) return;
     setImporting(true);
     setImportMessage(null);
     try {
-      const result = await libraryAdapter.importAudio();
-      if (result.status === "cancelled") return;
-      setImportMessage(result.status === "duplicate" ? `Already imported: ${result.track.title}` : `Imported: ${result.track.title}`);
+      if (libraryAdapter.scanAudioFolder) {
+        const result = await libraryAdapter.scanAudioFolder();
+        if (result.status === "cancelled") return;
+        const counts = result.result;
+        setImportMessage(`Folder scan finished: ${counts.imported} added, ${counts.updated} updated, ${counts.skipped} unchanged, ${counts.failed} errors, ${counts.missing} missing. Source files were indexed in place.`);
+      } else if (libraryAdapter.importAudio) {
+        const result = await libraryAdapter.importAudio();
+        if (result.status === "cancelled") return;
+        setImportMessage((result.status === "duplicate" ? `Already imported: ${result.track.title}` : `Imported: ${result.track.title}`) + (result.metadataWarning ? ` · ${result.metadataWarning}` : ""));
+      } else {
+        browserAudioInput.current?.click();
+        return;
+      }
       await loadLibrary();
+      if (activePlaylistId !== null && playlistAdapter) setPlaylistEntries(await playlistAdapter.listEntries(activePlaylistId));
     } catch (reason) {
       setImportMessage(reason instanceof Error ? reason.message : "The audio file could not be imported.");
     } finally {
@@ -401,23 +433,164 @@ function App() {
     }
   };
 
-  const previewSpotifyCsv = async () => {
+  const chooseBrowserAudioFolder = () => browserAudioFolderInput.current?.click();
+
+  const handleBrowserAudioSelection = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    if (!files.length) return;
+    const mp3Files = files.filter((file) => file.name.toLocaleLowerCase().endsWith(".mp3") || file.type === "audio/mpeg");
+    setImportMessage(mp3Files.length
+      ? `Selected ${mp3Files.length} MP3 file${mp3Files.length === 1 ? "" : "s"}. Browser access is permission-based; this local API has no browser upload endpoint, so these files were not copied or indexed. Use MyPod desktop's folder scan to index files in place.`
+      : "No MP3 files were selected. Nothing was uploaded, copied, or indexed.");
+  };
+
+  const previewSpotifyCsv = async (file?: File) => {
     if (!libraryAdapter.previewSpotifyCsv) return;
+    if (!iosRuntime && !file) {
+      csvInput.current?.click();
+      return;
+    }
     setPreviewingSpotifyCsv(true);
     setSpotifyPreviewMessage(null);
     setSpotifyPreview(null);
+    setSpotifyImportId(null);
     setSpotifyPreviewPage(0);
     try {
-      const result = await libraryAdapter.previewSpotifyCsv();
+      const result = await libraryAdapter.previewSpotifyCsv(file);
       if (result.status === "cancelled") return;
       setSpotifyPreview(result.preview);
+      setSpotifyImportId(result.importId ?? null);
       setSpotifyPreviewPage(0);
+      console.info("[MyPod CSV] UI state updated", { complete: result.preview.complete, sourceRecords: result.preview.summary.source_records, rows: result.preview.rows.length });
     } catch (reason) {
-      setSpotifyPreviewMessage(reason instanceof Error ? reason.message : "The CSV could not be previewed.");
+      const message = reason instanceof Error ? reason.message : String(reason);
+      console.error("[MyPod CSV] preview flow failed", { error: message });
+      setSpotifyPreviewMessage(message.includes("CSV file access failed") || message.includes("security") || message.includes("permission") || message.includes("access")
+        ? "MyPod could not read that file. Re-select it and try again."
+        : message.includes("CSV") || message.includes("header") || message.includes("parse")
+          ? `CSV validation failed: ${message}`
+          : iosRuntime
+            ? "MyPod could not preview the selected file. Re-select it from Files and try again."
+            : "MyPod could not preview that CSV. Check the local API and try again.");
     } finally {
       setPreviewingSpotifyCsv(false);
     }
   };
+
+  const reviewMatch = async (catalogId: number) => {
+    if (!libraryAdapter.listAudioMatchReview) return;
+    setMatchBusy(true);
+    try { const [review] = await libraryAdapter.listAudioMatchReview(catalogId); setMatchReview(review ?? null); setMatchTrackId(review?.track_id?.toString() ?? ""); }
+    catch (reason) { setPlaylistError(reason instanceof Error ? reason.message : "Review could not be loaded."); }
+    finally { setMatchBusy(false); }
+  };
+  const saveMatch = async (trackId: number | null) => {
+    if (!matchReview || !libraryAdapter.setAudioMatch) return;
+    setMatchBusy(true);
+    try {
+      await libraryAdapter.setAudioMatch(matchReview.catalog_id, trackId);
+      if (activePlaylistId !== null && playlistAdapter) setPlaylistEntries(await playlistAdapter.listEntries(activePlaylistId));
+      setMatchReview(null);
+    } catch (reason) { setPlaylistError(reason instanceof Error ? reason.message : "Match could not be saved."); }
+    finally { setMatchBusy(false); }
+  };
+
+  const confirmSpotifyImport = async () => {
+    if (!spotifyImportId || !libraryAdapter.confirmSpotifyImport) return;
+    setSpotifyImporting(true);
+    try {
+      const result = await libraryAdapter.confirmSpotifyImport(spotifyImportId);
+      setSpotifyPreviewMessage(result.already_imported ? "This source was already imported." : `Imported ${result.playlists} playlists and ${result.entries} entries. ${result.preserved_other_rows} other source rows preserved separately.`);
+      setSpotifyImportId(null);
+      await refreshPlaylists();
+    } catch (reason) { setSpotifyPreviewMessage(reason instanceof Error ? reason.message : "Import failed. No partial import was saved."); }
+    finally { setSpotifyImporting(false); }
+  };
+
+  const createLocalBackup = async (scope: BackupScope) => {
+    const adapter = libraryAdapter.backups;
+    if (!adapter) return;
+    setBackupBusy(true);
+    setBackupError(null);
+    setBackupMessage(null);
+    try {
+      const result = await adapter.createBackup(scope);
+      if (result.status === "cancelled") return;
+      if (result.exportError) {
+        setPendingBackupExport({ token: result.token, summary: result.summary });
+        setBackupError(`The backup bundle was created and retained on this device, but export failed: ${result.exportError}`);
+      } else {
+        setBackupMessage(`${scope === "complete" ? "Complete database-and-media" : "Database-only"} backup saved. ${result.summary.file_count} files · schema ${result.summary.schema_version} · ${result.summary.sha256.slice(0, 12)}…`);
+        setPendingBackupExport(null);
+      }
+    } catch (reason) {
+      setBackupError(reason instanceof Error ? reason.message : "Backup could not be created.");
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const retryBackupExport = async () => {
+    if (!libraryAdapter.backups || !pendingBackupExport) return;
+    setBackupBusy(true);
+    setBackupError(null);
+    try {
+      const exported = await libraryAdapter.backups.exportBackup(pendingBackupExport.token);
+      if (exported) {
+        setBackupMessage(`Backup exported. SHA-256 ${pendingBackupExport.summary.sha256}`);
+        setPendingBackupExport(null);
+      } else {
+        setBackupMessage("Export cancelled. The verified backup remains on this device and can be exported again.");
+      }
+    } catch (reason) {
+      setBackupError(reason instanceof Error ? reason.message : "Backup export failed.");
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const inspectLocalBackup = async () => {
+    if (!libraryAdapter.backups) return;
+    setBackupBusy(true);
+    setBackupError(null);
+    setBackupMessage(null);
+    setPendingBackupRestore(null);
+    try {
+      const result = await libraryAdapter.backups.inspectBackup();
+      if (result.status === "cancelled") return;
+      setPendingBackupRestore({ token: result.token, summary: result.summary });
+      setBackupMessage(`Backup verified: ${result.summary.scope === "complete" ? "database and media" : "database only"} · schema ${result.summary.schema_version} · ${result.summary.file_count} files · SHA-256 ${result.summary.sha256.slice(0, 12)}…`);
+    } catch (reason) {
+      setBackupError(reason instanceof Error ? reason.message : "Backup validation failed.");
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const restoreLocalBackup = async () => {
+    if (!libraryAdapter.backups || !pendingBackupRestore) return;
+    setBackupBusy(true);
+    setBackupError(null);
+    try {
+      const summary = await libraryAdapter.backups.restoreBackup(pendingBackupRestore.token);
+      setBackupMessage(`Restore completed and database integrity passed. Schema ${summary.schema_version}; ${summary.file_count} verified bundle files.`);
+      setPendingBackupRestore(null);
+      await loadLibrary();
+      await refreshPlaylists();
+    } catch (reason) {
+      setBackupError(reason instanceof Error ? reason.message : "Restore failed. The existing catalog remains available unless the atomic database replacement completed.");
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+  const spotifyGroups = spotifyPreview?.rows.reduce<Array<{ label: string; count: number }>>((groups, row, index, rows) => {
+    if (row.mapped.source_type !== "Playlist" || !row.mapped.playlist_name?.trim()) return groups;
+    const previous = rows[index - 1]?.mapped;
+    if (previous?.source_type === "Playlist" && previous.playlist_name === row.mapped.playlist_name) groups[groups.length - 1].count++;
+    else groups.push({ label: row.mapped.playlist_name, count: 1 });
+    return groups;
+  }, []) ?? [];
 
   const previewRows = spotifyPreview?.rows.slice(
     spotifyPreviewPage * SPOTIFY_PREVIEW_PAGE_SIZE,
@@ -510,17 +683,65 @@ function App() {
               {query.trim() ? <><TrackSection title={`Results in loaded tracks for “${query.trim()}”`} tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} playbackEnabled={playbackEnabled} onSelectTrack={setSelectedTrack} onPlay={(track) => void playbackController.play(track)} onAddToQueue={(track) => playbackController.enqueue(track)} emptyCopy="No matching tracks in the loaded part of your library." /><LoadMore count={tracks.length} total={total} loading={loadingMore} onLoad={loadMore} /></> : <EmptyState icon="search" title="Search your library" copy="Type a track, artist, or album name to find it on this device." />}
             </>}
 
+              {matchReview && <section className="spotify-preview" aria-label="Review audio match">
+                <h2>Audio match: {matchReview.title}</h2><p>{matchReview.artist} · {matchReview.album}</p>
+                <p>{matchReview.track_id ? `${matchReview.method} link · ${matchReview.available ? "Audio available" : "Audio missing"}` : "No verified audio link"}. Confirm only the same recording and version. Your choice applies to every playlist containing this catalog track.</p>
+                {matchReview.candidates.map((c) => <p key={c.track_id}>{c.title} · {c.artist} · {c.album}: {c.reason}{!c.available && " (file missing)"}</p>)}
+                <label>Local audio <select value={matchTrackId} onChange={(e) => setMatchTrackId(e.target.value)}><option value="">Choose a file</option>{[...new Map([...matchReview.candidates.map((c) => ({id:c.track_id,title:c.title,is_missing:c.available ? 0 : 1})),...tracks].map((t) => [t.id,t])).values()].map((t) => <option key={t.id} value={t.id} disabled={Boolean(t.is_missing)}>{t.title}{t.is_missing ? " (missing)" : ""}</option>)}</select></label>
+                <button type="button" disabled={!matchTrackId || matchBusy} onClick={() => void saveMatch(Number(matchTrackId))}>Confirm audio match</button>
+                <button type="button" disabled={matchBusy} onClick={() => void saveMatch(null)}>Unlink audio</button>
+                <button type="button" disabled={matchBusy} onClick={() => setMatchReview(null)}>Cancel</button>
+                <LoadMore count={tracks.length} total={total} loading={loadingMore} onLoad={loadMore} />
+              </section>}
+
             {view === "Your Library" && <>
-              <div className="page-heading library-heading"><div><p className="eyebrow">YOUR COLLECTION</p><h1>Your Library</h1><p>{total ? `${total} tracks indexed on this device` : "Your local collection, all in one place."}</p></div><div className="library-actions">{libraryAdapter.previewSpotifyCsv && <button className="import-audio-button" type="button" onClick={() => void previewSpotifyCsv()} disabled={previewingSpotifyCsv}>{previewingSpotifyCsv ? "Reading CSV…" : "Preview Spotify CSV"}</button>}{libraryAdapter.importAudio && <button className="import-audio-button" type="button" onClick={() => void importAudio()} disabled={importing}>{importing ? "Importing…" : "Import audio"}</button>}<button className="round-action" type="button" onClick={() => void loadLibrary()} aria-label="Refresh library"><Icon name="refresh" /></button></div></div>
+              <div className="page-heading library-heading"><div><p className="eyebrow">YOUR COLLECTION</p><h1>Your Library</h1><p>{total ? `${total} tracks indexed on this device` : "Your local collection, all in one place."}</p></div><div className="library-actions">
+                {!iosRuntime && libraryAdapter.previewSpotifyCsv && <input className="file-picker-hidden" ref={csvInput} type="file" accept=".csv,text/csv" aria-label="Choose Spotify CSV file" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (file) void previewSpotifyCsv(file); }} />}
+                {!iosRuntime && !tauriRuntime && <>
+                  <input className="file-picker-hidden" ref={browserAudioInput} type="file" accept=".mp3,audio/mpeg" multiple aria-label="Choose MP3 audio files" onChange={handleBrowserAudioSelection} />
+                  <input className="file-picker-hidden" ref={(element) => { browserAudioFolderInput.current = element; element?.setAttribute("webkitdirectory", ""); }} type="file" accept=".mp3,audio/mpeg" multiple aria-label="Choose a folder of MP3 audio files" onChange={handleBrowserAudioSelection} />
+                </>}
+                {libraryAdapter.previewSpotifyCsv && <button className="import-audio-button" type="button" onClick={() => void previewSpotifyCsv()} disabled={previewingSpotifyCsv}>{previewingSpotifyCsv ? "Reading CSV…" : iosRuntime ? "Preview Spotify CSV" : "Import Spotify CSV"}</button>}
+                {(libraryAdapter.importAudio || localAudioScanAvailable || !iosRuntime) && <button className="import-audio-button" type="button" onClick={() => void importAudio()} disabled={importing}>{importing ? "Working…" : "Import Audio"}</button>}
+                {!iosRuntime && !tauriRuntime && browserFolderPickerAvailable && <button className="import-audio-button secondary-import-action" type="button" onClick={chooseBrowserAudioFolder}>Choose folder</button>}
+                <button className="round-action" type="button" onClick={() => void loadLibrary()} aria-label="Refresh library"><Icon name="refresh" /></button>
+              </div></div>
+              <div className="library-import-notes" aria-label="Import information">
+                {!iosRuntime && <p>Spotify CSV is preview-only on web and desktop; this backend does not save CSV imports.</p>}
+                {localAudioScanAvailable && <p>Folder scans index files in place. The selected directory must be inside a configured permitted scan root.</p>}
+                {!iosRuntime && !tauriRuntime && <p>Browser file and folder selection grants temporary access only. Selected MP3 files are not uploaded, copied, or indexed; use the MyPod desktop folder scanner to add them in place.</p>}
+              </div>
+              {libraryAdapter.backups && <section className="backup-panel" aria-labelledby="backup-panel-title">
+                <div><p className="eyebrow">ON-DEVICE RECOVERY</p><h2 id="backup-panel-title">Backup &amp; restore</h2><p>Created on this device and saved to a Files location you choose. Choose an on-device location for local-only storage; Files providers may sync selected files.</p></div>
+                <div className="backup-actions">
+                  <button type="button" onClick={() => void createLocalBackup("complete")} disabled={backupBusy}>{backupBusy ? "Working…" : "Back up database + media"}</button>
+                  <button type="button" onClick={() => void createLocalBackup("database_only")} disabled={backupBusy}>{backupBusy ? "Working…" : "Database-only backup"}</button>
+                  <button type="button" onClick={() => void inspectLocalBackup()} disabled={backupBusy}>{backupBusy ? "Working…" : "Choose backup to restore"}</button>
+                  {pendingBackupExport && <button type="button" onClick={() => void retryBackupExport()} disabled={backupBusy}>Retry exporting retained backup</button>}
+                </div>
+                {backupMessage && <p className="backup-message" role="status" aria-live="polite">{backupMessage}</p>}
+                {backupError && <p className="backup-error" role="alert">{backupError}</p>}
+                {pendingBackupRestore && <div className="backup-review" role="region" aria-label="Validated backup details">
+                  <strong>Backup integrity verified</strong>
+                  <span>{pendingBackupRestore.summary.scope === "complete" ? "Database and managed media" : "Database only"} · schema {pendingBackupRestore.summary.schema_version} · {pendingBackupRestore.summary.file_count} files · SHA-256 {pendingBackupRestore.summary.sha256.slice(0, 16)}…</span>
+                  <p>Restoring replaces the catalog and playlists after validation. Existing managed audio is never deleted; identical files are reused and new bundle media is merged. A database-only restore requires matching local media to already exist.</p>
+                  <button type="button" className="backup-restore-button" disabled={backupBusy} onClick={() => void restoreLocalBackup()}>I understand — replace catalog and restore</button>
+                </div>}
+              </section>}
               {importMessage && <p className="import-status" role="status" aria-live="polite">{importMessage}</p>}
+              {import.meta.env.VITE_MYPOD_IOS_DIAGNOSTICS === "true" && libraryAdapter.previewSpotifyCsv && <details className="spotify-preview"><summary>iOS runtime diagnostics</summary><button type="button" onClick={() => void invoke<IosRuntimeDiagnostics>("ios_runtime_diagnostics", { selectedPath: null, stagingSucceeded: false, previewSucceeded: false }).then(setIosDiagnostics).catch((error) => setIosDiagnostics({ bridge_works: false, native_build_id: "unknown", database_schema_version: null, migration_status: "unknown", csv_selection_returned_path: false, selected_file_exists: null, staging_succeeded: false, preview_succeeded: false, failure_stage: "bridge", sanitized_error: String(error) }))}>Check native bridge</button>{iosDiagnostics && <dl><dt>Bridge</dt><dd>{iosDiagnostics.bridge_works ? "Connected" : "Failed"}</dd><dt>Native build</dt><dd>{iosDiagnostics.native_build_id}</dd><dt>Database</dt><dd>Schema {iosDiagnostics.database_schema_version ?? "unavailable"} · {iosDiagnostics.migration_status}</dd><dt>CSV selection</dt><dd>{iosDiagnostics.csv_selection_returned_path ? "Path received" : "No path observed"} · {iosDiagnostics.selected_file_exists === null ? "not checked" : iosDiagnostics.selected_file_exists ? "original file visible" : "original provider URL unavailable"} · staging {iosDiagnostics.staging_succeeded ? "succeeded" : "not reported"} · parsing {iosDiagnostics.preview_succeeded ? "succeeded" : "not reported"}</dd><dt>Failure stage</dt><dd>{iosDiagnostics.failure_stage}{iosDiagnostics.sanitized_error ? ` · ${iosDiagnostics.sanitized_error}` : ""}</dd></dl>}</details>}
               {libraryAdapter.previewSpotifyCsv && <section className="spotify-preview" aria-labelledby="spotify-preview-title">
-                <div className="spotify-preview-intro"><div><h2 id="spotify-preview-title">Spotify CSV preview</h2><p>Read-only review. This does not add tracks, playlists, favorites, or audio to MyPod.</p></div>{spotifyPreview && <button type="button" className="preview-dismiss" onClick={() => setSpotifyPreview(null)}>Close preview</button>}</div>
+                <div className="spotify-preview-intro"><div><h2 id="spotify-preview-title">Spotify CSV preview</h2><p>{libraryAdapter.confirmSpotifyImport ? "Review first, then confirm to save metadata and playlists on this device. Audio can be added later." : "Preview only: this desktop/web backend does not persist Spotify CSV imports. Previewing never writes to the library."}</p></div>{spotifyPreview && <button type="button" className="preview-dismiss" onClick={() => setSpotifyPreview(null)}>Close preview</button>}</div>
                 {spotifyPreviewMessage && <p className="spotify-preview-message" role="alert">{spotifyPreviewMessage}</p>}
                 {spotifyPreview && <>
                   <div className={`spotify-preview-summary${spotifyPreview.complete ? "" : " preview-incomplete"}`} role="status" aria-live="polite">
                     <strong>{spotifyPreview.complete ? "Preview complete" : "Partial preview — later records could not be recovered"}</strong>
                     <span>{spotifyPreview.summary.preview_rows} non-empty records shown · {spotifyPreview.summary.ignored_empty_records} empty records ignored · {spotifyPreview.summary.rows_with_errors} rows with errors · {spotifyPreview.summary.rows_with_warnings} warnings</span>
                   </div>
+                  <p>Source row order is provisional; it may differ from Spotify order. Each contiguous block of an exact Playlist name becomes a separate imported playlist. Same-named playlists within one block cannot be distinguished because this CSV has no playlist IDs. Favorites, Album, Artist and unnamed rows are preserved separately.</p>
+                  <p>{spotifyGroups.length} playlist blocks · {spotifyPreview.rows.filter((r) => r.mapped.source_type === "Playlist" && !r.mapped.playlist_name?.trim()).length} playlist rows missing a name</p>
+                  <details><summary>Playlist groups</summary><ul>{spotifyGroups.map((g, i) => <li key={i}>{g.label}: {g.count} entries</li>)}</ul></details>
+                  {spotifyImportId && <button type="button" disabled={spotifyImporting || !spotifyPreview.complete || spotifyPreview.file_errors.length > 0 || spotifyPreview.summary.rows_with_errors > 0} onClick={() => void confirmSpotifyImport()}>{spotifyImporting ? "Importing…" : "Confirm metadata and playlist import"}</button>}
                   {spotifyPreview.file_errors.length > 0 && <ul className="spotify-preview-issues" aria-label="File-level diagnostics">{spotifyPreview.file_errors.map((issue, index) => <li key={`${issue.code}-${index}`}><strong>{issue.code.replaceAll("_", " ")}</strong>{issue.message && ` — ${issue.message}`}{issue.columns && `: ${issue.columns.join(", ")}`}{issue.physical_line_start && ` (physical lines ${issue.physical_line_start}–${issue.physical_line_end})`}</li>)}</ul>}
                   {spotifyPreview.summary.ignored_empty_spans.length > 0 && <details className="spotify-preview-duplicates"><summary>Empty source rows and line spans</summary><ul>{spotifyPreview.summary.ignored_empty_spans.map((span) => <li key={`${span.source_record_start}-${span.source_record_end}`}>Source record{span.source_record_start === span.source_record_end ? "" : "s"} {span.source_record_start}{span.source_record_end === span.source_record_start ? "" : `–${span.source_record_end}`} · physical lines {span.physical_line_start}–{span.physical_line_end}</li>)}</ul></details>}
                   {spotifyPreview.duplicate_reports.length > 0 && <details className="spotify-preview-duplicates"><summary>{spotifyPreview.duplicate_reports.length} duplicate or metadata conflict reports</summary><ul>{spotifyPreview.duplicate_reports.map((report) => <li key={report.report_id}><strong>{report.category.replaceAll("_", " ")}</strong> · source records {report.source_records.join(", ")}{report.differing_fields?.length ? ` · differing: ${report.differing_fields.join(", ")}` : ""}</li>)}</ul></details>}
@@ -540,10 +761,10 @@ function App() {
                 {playlistError && <p className="playlist-error" role="alert">{playlistError}</p>}
                 {activePlaylistId === null ? <>
                   <div className="section-title"><h2>Your playlists</h2><button type="button" onClick={() => { setPlaylistName(""); setPlaylistDialog("create"); }}><Icon name="plus" size={16} /> New playlist</button></div>
-                  {playlists.length ? <><p className="visually-hidden" id="playlist-gallery-help">Swipe or scroll horizontally to browse. Use the left and right arrow keys to move between playlists.</p><div className="playlist-gallery" role="list" aria-label="Your playlists" aria-describedby="playlist-gallery-help" tabIndex={0} onKeyDown={handlePlaylistGalleryKeyDown}>{playlists.map((playlist) => <div className="playlist-card-item" role="listitem" key={playlist.id}><button className="playlist-card" type="button" data-playlist-card onClick={() => void selectPlaylist(playlist.id)} aria-label={`Open ${playlist.name}, ${playlist.track_count} ${playlist.track_count === 1 ? "track" : "tracks"}`}><PlaylistCover /><strong>{playlist.name}</strong><small>{playlist.track_count} {playlist.track_count === 1 ? "track" : "tracks"}</small></button></div>)}</div></> : <EmptyState icon="library" title="No playlists yet" copy="Create a playlist, then add tracks from this on-device library." />}
+                  {playlists.length ? <><p className="visually-hidden" id="playlist-gallery-help">Swipe or scroll horizontally to browse. Use the left and right arrow keys to move between playlists.</p><div className="playlist-gallery" role="list" aria-label="Your playlists" aria-describedby="playlist-gallery-help" tabIndex={0} onKeyDown={handlePlaylistGalleryKeyDown}>{[...playlists].sort((a, b) => Number(Boolean(a.source_playlist_identifier)) - Number(Boolean(b.source_playlist_identifier))).map((playlist) => <div className="playlist-card-item" role="listitem" key={playlist.id}><button className="playlist-card" type="button" data-playlist-card onClick={() => void selectPlaylist(playlist.id)} aria-label={`Open ${playlist.name}, ${playlist.track_count} ${playlist.track_count === 1 ? "track" : "tracks"}`}><PlaylistCover /><strong>{playlist.name}</strong><small>{playlist.source_playlist_identifier?.startsWith("spotify-import:") ? "Imported Spotify · " : "My playlist · "}{playlist.track_count} {playlist.track_count === 1 ? "track" : "tracks"}</small></button></div>)}</div></> : <EmptyState icon="library" title="No playlists yet" copy="Create a playlist, then add tracks from this on-device library." />}
                 </> : <>
-                  <div className="playlist-detail-heading"><button type="button" className="playlist-back" onClick={() => setActivePlaylistId(null)}>All playlists</button><div className="playlist-heading-copy"><p className="eyebrow">ON THIS DEVICE</p><h2>{playlists.find((playlist) => playlist.id === activePlaylistId)?.name || "Playlist"}</h2><p>{playlistEntries.length} {playlistEntries.length === 1 ? "entry" : "entries"} · order is saved on this device</p></div><div className="playlist-detail-actions"><button type="button" onClick={() => { setPlaylistName(playlists.find((playlist) => playlist.id === activePlaylistId)?.name || ""); setPlaylistDialog("rename"); }}>Rename</button><button type="button" onClick={() => setPlaylistDialog("delete")}>Delete</button><button type="button" onClick={() => setPlaylistDialog("add")} disabled={tracks.length === 0}>Add tracks</button></div></div>
-                  {playlistEntries.length ? <ol className="playlist-entry-list">{playlistEntries.map((entry, index) => <li key={entry.id} className="playlist-entry-row"><span className="playlist-entry-position">{index + 1}</span><Art label={entry.album || entry.title} size="small" /><div className="playlist-entry-copy"><strong>{entry.title}</strong><span>{entry.artist || (entry.track_id === null ? "Unmatched source track · kept for review" : "Unknown artist")}{entry.album ? ` · ${entry.album}` : ""}</span></div>{entry.track_id !== null ? <button type="button" className="playlist-entry-play" onClick={() => void playPlaylistEntry(entry)} disabled={!playbackEnabled} aria-label={`Play ${entry.title}`}><Icon name="play" size={16} /></button> : <span className="playlist-unmatched">Review</span>}<div className="playlist-order-controls"><button type="button" onClick={() => void movePlaylistEntry(index, -1)} disabled={index === 0 || playlistBusy} aria-label={`Move ${entry.title} up`}>↑</button><button type="button" onClick={() => void movePlaylistEntry(index, 1)} disabled={index === playlistEntries.length - 1 || playlistBusy} aria-label={`Move ${entry.title} down`}>↓</button></div><button type="button" className="playlist-entry-remove" onClick={() => void removePlaylistEntry(entry.id)} aria-label={`Remove ${entry.title} from playlist`}><Icon name="close" size={16} /></button></li>)}</ol> : <EmptyState icon="music" title="This playlist is empty" copy="Add one or more tracks from your on-device library. Repeated entries are allowed." />}
+                  <div className="playlist-detail-heading"><button type="button" className="playlist-back" onClick={() => setActivePlaylistId(null)}>All playlists</button><div className="playlist-heading-copy"><p className="eyebrow">ON THIS DEVICE</p><h2>{playlists.find((playlist) => playlist.id === activePlaylistId)?.name || "Playlist"}</h2><p>{playlistEntries.length} {playlistEntries.length === 1 ? "entry" : "entries"} · {playlists.find((p) => p.id === activePlaylistId)?.source_playlist_identifier?.startsWith("spotify-import:") ? "provisional source order; edits saved locally" : "display order saved on this device"}</p></div><div className="playlist-detail-actions"><button type="button" onClick={() => { setPlaylistName(playlists.find((playlist) => playlist.id === activePlaylistId)?.name || ""); setPlaylistDialog("rename"); }}>Rename</button><button type="button" onClick={() => setPlaylistDialog("delete")}>Delete</button><button type="button" onClick={() => setPlaylistDialog("add")} disabled={tracks.length === 0}>Add tracks</button></div></div>
+                  {playlistEntries.length ? <ol className="playlist-entry-list">{playlistEntries.map((entry, index) => <li key={entry.id} className="playlist-entry-row"><span className="playlist-entry-position">{index + 1}</span><Art label={entry.album || entry.title} size="small" /><div className="playlist-entry-copy"><strong>{entry.title}</strong><span>{entry.artist || (entry.track_id === null ? "Unmatched source track · kept for review" : "Unknown artist")}{entry.album ? ` · ${entry.album}` : ""}{entry.catalog_id ? (entry.track_id === null ? " · Missing audio" : " · Audio linked") : ""}</span>{entry.catalog_id && libraryAdapter.setAudioMatch && <button type="button" disabled={matchBusy} onClick={() => void reviewMatch(entry.catalog_id!)}>Review audio</button>}</div>{entry.track_id !== null ? <button type="button" className="playlist-entry-play" onClick={() => void playPlaylistEntry(entry)} disabled={!playbackEnabled} aria-label={`Play ${entry.title}`}><Icon name="play" size={16} /></button> : <span className="playlist-unmatched">Missing audio</span>}<div className="playlist-order-controls"><button type="button" onClick={() => void movePlaylistEntry(index, -1)} disabled={index === 0 || playlistBusy} aria-label={`Move ${entry.title} up`}>↑</button><button type="button" onClick={() => void movePlaylistEntry(index, 1)} disabled={index === playlistEntries.length - 1 || playlistBusy} aria-label={`Move ${entry.title} down`}>↓</button></div><button type="button" className="playlist-entry-remove" onClick={() => void removePlaylistEntry(entry.id)} aria-label={`Remove ${entry.title} from playlist`}><Icon name="close" size={16} /></button></li>)}</ol> : <EmptyState icon="music" title="This playlist is empty" copy="Add one or more tracks from your on-device library. Repeated entries are allowed." />}
                 </>}
               </section> : <EmptyState icon="library" title="Playlist support is not available here" copy="Playlists are currently stored in the iPhone's on-device catalog." />)}
               <LoadMore count={tracks.length} total={total} loading={loadingMore} onLoad={loadMore} />

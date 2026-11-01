@@ -423,6 +423,26 @@ body, .app-shell { background: var(--bg); }
 .sidebar-library-heading h2 { margin: 0; color: #f2f2f2; font-size: 16px; font-weight: 700; }
 .sidebar-library-heading button { display: grid; width: 40px; height: 40px; place-items: center; border: 0; border-radius: 50%; background: transparent; color: #c6c6c6; }
 .sidebar-library-heading button:disabled { opacity: .48; }
+.backup-panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px 22px; align-items: start; margin: -12px 0 22px; padding: 17px 19px; border: 1px solid #ffffff17; border-radius: 12px; background: #191b1c; }
+.backup-panel h2 { margin: 0; color: #f3f4f4; font-size: 16px; }
+.backup-panel p { max-width: 660px; margin: 7px 0 0; color: #a9afb2; font-size: 12px; line-height: 1.5; }
+.backup-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.backup-actions button, .backup-restore-button { min-height: 38px; padding: 0 12px; border: 1px solid #ffffff24; border-radius: 8px; background: #24282a; color: #f0f2f2; font-size: 11px; }
+.backup-actions button:hover:not(:disabled), .backup-restore-button:hover:not(:disabled) { border-color: var(--lime); color: var(--lime); }
+.backup-actions button:disabled, .backup-restore-button:disabled { opacity: .6; }
+.backup-message, .backup-error, .backup-review { grid-column: 1 / -1; }
+.backup-panel .backup-message { color: var(--lime); }
+.backup-panel .backup-error { color: #ff9b91; }
+.backup-review { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid #ffffff1a; color: #f2f4f4; font-size: 12px; }
+.backup-review span, .backup-review p { color: #aeb4b7; }
+.backup-review p { margin: 0; }
+.backup-restore-button { justify-self: start; border-color: #d9a49c; }
+.backup-panel button:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
+@media (max-width: 760px) {
+  .backup-panel { grid-template-columns: 1fr; margin-top: -5px; padding: 14px; }
+  .backup-actions { justify-content: flex-start; }
+  .backup-actions button, .backup-restore-button { min-height: 44px; }
+}
 .sidebar-library-filters { display: flex; gap: 7px; overflow-x: auto; padding: 8px 4px 12px; scrollbar-width: none; }
 .sidebar-library-filters button, .home-filter-pills button { flex: 0 0 auto; min-height: 36px; padding: 0 14px; border: 0; border-radius: 20px; background: #292929; color: #e5e5e5; font-size: 12px; cursor: pointer; }
 .sidebar-library-filters button:hover, .home-filter-pills button:hover { background: #383838; }
@@ -445,6 +465,10 @@ body, .app-shell { background: var(--bg); }
 .import-audio-button { min-height: 39px; padding: 0 14px; border: 1px solid #c3f36b55; border-radius: 22px; background: #c3f36b12; color: #d9f0b6; font-size: 12px; font-weight: 650; cursor: pointer; }
 .import-audio-button:hover:not(:disabled) { background: #c3f36b22; border-color: var(--lime); }
 .import-audio-button:disabled { opacity: .55; }
+.secondary-import-action { border-color: #ffffff1c; background: #ffffff08; color: #d2d5d8; }
+.file-picker-hidden { display: none; }
+.library-import-notes { display: grid; gap: 4px; margin: -17px 0 18px; }
+.library-import-notes p { margin: 0; color: #a5aaad; font-size: 11px; line-height: 1.45; }
 .import-status { margin: -14px 0 17px; color: #c6d3b6; font-size: 12px; }
 .spotify-preview { margin: 0 0 24px; padding: 16px; border: 1px solid #ffffff14; border-radius: 10px; background: #171819; }
 .spotify-preview-intro, .spotify-preview-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -519,6 +543,8 @@ body, .app-shell { background: var(--bg); }
 }
 
 @media (max-width: 760px) {
+  .library-actions { flex-wrap: wrap; justify-content: flex-start; }
+  .library-actions .import-audio-button { min-height: 44px; }
   .app-shell { display: block; padding: 0; }
   .sidebar { display: none; }
   .topbar { height: 62px; padding: 0 15px; }
@@ -631,4 +657,14 @@ body, .app-shell { background: var(--bg); }
   .track-header, .track-row { grid-template-columns: 16px 38px minmax(0, 1fr) 38px 38px; column-gap: 5px; }
   .queue-add, .row-play { width: 36px; height: 40px; }
   .queue-toggle { min-width: 36px; }
+}
+
+/* Keep match review inside the metadata cell, with usable playback controls on iPhone. */
+.playlist-entry-copy > button { align-self: flex-start; width: fit-content; border: 1px solid #ffffff30; border-radius: 6px; padding: 5px 8px; margin-top: 5px; background: transparent; color: var(--lime); font-size: 12px; min-height: 32px; }
+@media (max-width: 700px) {
+  .playlist-entry-row { grid-template-columns: 18px 32px minmax(0, 1fr) 32px 32px; }
+  .playlist-entry-row .playlist-entry-play { display: grid; grid-column: 4; grid-row: 1; }
+  .playlist-entry-position, .playlist-entry-row > .album-art, .playlist-entry-copy { grid-row: 1; }
+  .playlist-entry-remove { grid-column: 5; grid-row: 1; }
+  .playlist-order-controls { grid-column: 3 / 5; grid-row: 2; }
 }

@@ -271,11 +271,12 @@ export class PlaybackController {
       if (attempt !== this.playAttempt || this.snapshot.track?.id !== track.id) return;
       this.startIntent = null;
       const name = reason instanceof DOMException ? reason.name : "PlaybackError";
+      const safeMessage = reason instanceof Error ? reason.message : "";
       this.update({
         phase: "error",
         error: name === "NotAllowedError"
           ? "Playback was blocked by the WebView. Try pressing play again."
-          : "This track could not be played. It may be unsupported or unavailable.",
+          : safeMessage || "This track could not be played. It may be unsupported or unavailable.",
       });
     }
   }
@@ -369,7 +370,7 @@ export class PlaybackController {
       phase: "error",
       error: event.unsupported
         ? "This audio format is not supported by the current player."
-        : "This track could not be loaded. Check that the local API and file are available.",
+        : "This track could not be loaded. The file may be missing or its format unsupported.",
     });
   };
 }
