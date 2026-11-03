@@ -119,6 +119,31 @@ test("iOS driver reports native command failures safely and does not overstate m
   assert.equal(events.some(({ type, unsupported }) => type === "error" && !unsupported), true);
 });
 
+test("iOS driver exposes ready and failed AVPlayer state without logging track metadata or paths", async () => {
+  const infos = [];
+  const originalInfo = console.info;
+  console.info = (...values) => infos.push(values);
+  try {
+    const { driver, poll } = setup([
+      nativeState({ ready: true, player_status: "ready", item_status: "ready", duration: 16 }),
+      nativeState({ error: "native failure", failure_code: -11828, player_status: "failed", item_status: "failed" }),
+    ]);
+    const events = [];
+    driver.subscribe((event) => events.push(event));
+    driver.load(12);
+    await driver.play();
+    await new Promise((resolve) => setImmediate(resolve));
+    await poll();
+    assert.equal(events.some(({ type }) => type === "playing"), false);
+    assert.equal(events.some(({ type, message }) => type === "error" && message.includes("-11828")), true);
+    assert.equal(events.some(({ type, duration }) => type === "metadata" && duration === 16), true);
+    assert.equal(infos.some(([, state]) => state?.ready === true), true);
+    assert.doesNotMatch(JSON.stringify(infos), /private|Artist|Title|\.mp3|\/Users\//);
+  } finally {
+    console.info = originalInfo;
+  }
+});
+
 test("iOS driver reports rejected pause and seek commands as media errors", async () => {
   for (const [command, action] of [
     ["pause_local_playback", (driver) => driver.pause()],
@@ -140,4 +165,22 @@ test("iOS driver reports rejected pause and seek commands as media errors", asyn
     assert.equal(events.some(({ type }) => type === "error"), true, `${command} should emit an error`);
     assert.equal(driver.paused, true, `${command} rejection must not claim active playback`);
   }
+});
+
+test("iOS seek delegates to the native playback command without changing audio source", async () => {
+  const { driver, calls, poll } = setup([
+    nativeState({ playing: true, current_time: 3 }),
+    nativeState({ playing: true, current_time: 8 }),
+    nativeState({ playing: true, current_time: 8 }),
+  ]);
+  driver.load(12);
+  await driver.play();
+  driver.seek(8);
+  await new Promise((resolve) => setImmediate(resolve));
+  await poll();
+  assert.deepEqual(calls.find(({ command }) => command === "seek_local_playback"), {
+    command: "seek_local_playback",
+    args: { seconds: 8 },
+  });
+  assert.equal(calls.some(({ args }) => args && Object.values(args).some((value) => typeof value === "string" && value.includes("/"))), false);
 });

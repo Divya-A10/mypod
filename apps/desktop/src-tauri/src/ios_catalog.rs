@@ -31,6 +31,12 @@ pub struct CatalogTrack {
     pub is_missing: i64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArtworkPayload {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ImportTrackResult {
     pub track: CatalogTrack,
@@ -76,6 +82,31 @@ pub async fn get_track(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn get_track_artwork(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::IosCatalogLock>,
+    track_id: i64,
+) -> Result<tauri::ipc::Response, String> {
+    let root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?;
+    let lock = state.0.clone();
+    let artwork = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.lock().map_err(|_| "Library is busy".to_string())?;
+        artwork_for_track_at(&root, track_id)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    // Tauri transports raw IPC bytes as an ArrayBuffer, avoiding JSON arrays
+    // (which multiply image payload size and allocation on iPhone).
+    Ok(tauri::ipc::Response::new(
+        artwork.map(|payload| payload.bytes).unwrap_or_default(),
+    ))
 }
 
 #[cfg(target_os = "ios")]
@@ -336,6 +367,52 @@ fn get_track_at(app_local_data: &Path, track_id: i64) -> Result<CatalogTrack, St
     track.is_missing = i64::from(!managed_file_exists(&root, &relative_path));
     apply_embedded_metadata(&connection, &mut track)?;
     Ok(track)
+}
+
+fn artwork_for_track_at(app_local_data: &Path, track_id: i64) -> Result<Option<ArtworkPayload>, String> {
+    if track_id <= 0 {
+        return Err("A valid library track ID is required".to_string());
+    }
+    let root = app_root(app_local_data)?;
+    let connection = open_catalog(&root)?;
+    let metadata = connection
+        .query_row(
+            "SELECT imported_tracks.id, audio_metadata.artist, audio_metadata.album \
+             FROM imported_tracks LEFT JOIN audio_metadata ON audio_metadata.track_id = imported_tracks.id \
+             WHERE imported_tracks.id = ?1",
+            [track_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Track not found".to_string())?;
+
+    let mut candidates = vec![track_id];
+    if metadata.2.as_deref().is_some_and(|album| !album.trim().is_empty()) {
+        let mut query = connection
+            .prepare(
+                "SELECT track_id FROM audio_metadata WHERE track_id != ?1 \
+                 AND album = ?2 COLLATE NOCASE AND artist IS ?3 ORDER BY track_id LIMIT 24",
+            )
+            .map_err(|error| error.to_string())?;
+        let peers = query
+            .query_map(rusqlite::params![track_id, metadata.2, metadata.1], |row| row.get::<_, i64>(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        candidates.extend(peers);
+    }
+
+    for candidate_id in candidates {
+        let path = match resolve_track_audio_path_at(app_local_data, candidate_id) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        if let Some((bytes, mime_type)) = crate::ios_audio_matching::read_cover_art(&path) {
+            return Ok(Some(ArtworkPayload { mime_type, bytes }));
+        }
+    }
+    Ok(None)
 }
 
 fn apply_embedded_metadata(db: &Connection, track: &mut CatalogTrack) -> Result<(), String> {
@@ -738,6 +815,25 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
+    fn synthetic_wav_with_metadata(path: &Path, title: &str, artist: &str, album: &str, artwork: Option<Vec<u8>>) {
+        synthetic_wav(path);
+        use lofty::{picture::{MimeType, Picture, PictureType}, tag::{Accessor, Tag, TagExt, TagType}};
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_title(title.to_string());
+        tag.set_artist(artist.to_string());
+        tag.set_album(album.to_string());
+        if let Some(artwork) = artwork {
+            tag.push_picture(Picture::new_unchecked(PictureType::CoverFront, Some(MimeType::Png), None, artwork));
+        }
+        tag.save_to_path(path, lofty::config::WriteOptions::default()).unwrap();
+    }
+
+    fn stage_synthetic_wav(base: &Path, token: &str, title: &str, artist: &str, album: &str, artwork: Option<Vec<u8>>) {
+        let root = app_root(base).unwrap();
+        let staging = ensure_child_dir(&root, STAGING_FOLDER).unwrap();
+        synthetic_wav_with_metadata(&staging.join(format!("{token}.part")), title, artist, album, artwork);
+    }
+
     #[test]
     fn imports_synthetic_audio_and_reads_it_after_reopening_catalog() {
         let base = temp_root("catalog-reopen");
@@ -762,6 +858,42 @@ mod tests {
         let listed = list_tracks_at(&base, 0).unwrap();
         assert_eq!(listed.total, 1);
         assert_eq!(listed.items, vec![imported.track]);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn reads_track_art_first_then_only_exact_album_artist_artwork() {
+        let base = temp_root("artwork-fallback");
+        let cover = b"\x89PNG\r\n\x1a\nsynthetic-album-cover".to_vec();
+        let alternate_cover = b"\x89PNG\r\n\x1a\nsynthetic-track-cover".to_vec();
+        stage_synthetic_wav(&base, "11111111111111111111111111111111", "First", "Artist", "Shared Album", None);
+        stage_synthetic_wav(&base, "22222222222222222222222222222222", "Second", "Artist", "Shared Album", Some(cover.clone()));
+        stage_synthetic_wav(&base, "33333333333333333333333333333333", "Third", "Artist", "Shared Album", Some(alternate_cover.clone()));
+        stage_synthetic_wav(&base, "44444444444444444444444444444444", "Other artist", "Different Artist", "Shared Album", None);
+        let staged_cover = app_root(&base).unwrap().join("Importing/22222222222222222222222222222222.part");
+        assert_eq!(crate::ios_audio_matching::read_cover_art(&staged_cover).as_ref().map(|item| &item.0), Some(&cover));
+        let first = register_import_at(&base, "11111111111111111111111111111111", "first.wav", "wav").unwrap();
+        let second = register_import_at(&base, "22222222222222222222222222222222", "second.wav", "wav").unwrap();
+        let third = register_import_at(&base, "33333333333333333333333333333333", "third.wav", "wav").unwrap();
+        let other = register_import_at(&base, "44444444444444444444444444444444", "other.wav", "wav").unwrap();
+        let second_path = resolve_track_audio_path_at(&base, second.track.id).unwrap();
+        assert_eq!(crate::ios_audio_matching::read_cover_art(&second_path).as_ref().map(|item| &item.0), Some(&cover));
+        let root = app_root(&base).unwrap();
+        let connection = open_catalog(&root).unwrap();
+        let first_meta: (Option<String>, Option<String>) = connection.query_row("SELECT artist,album FROM audio_metadata WHERE track_id=?1", [first.track.id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(first_meta, (Some("Artist".into()), Some("Shared Album".into())));
+        let peer_count: i64 = connection.query_row("SELECT COUNT(*) FROM audio_metadata WHERE track_id != ?1 AND album = ?2 COLLATE NOCASE AND artist IS ?3", rusqlite::params![first.track.id, first_meta.1, first_meta.0], |row| row.get(0)).unwrap();
+        assert_eq!(peer_count, 2);
+
+        let inherited = artwork_for_track_at(&base, first.track.id).unwrap().unwrap();
+        assert_eq!(inherited.mime_type, "image/png");
+        assert_eq!(inherited.bytes, cover);
+        assert_eq!(artwork_for_track_at(&base, second.track.id).unwrap().unwrap().bytes, cover);
+        assert_eq!(artwork_for_track_at(&base, third.track.id).unwrap().unwrap().bytes, alternate_cover);
+        assert_eq!(artwork_for_track_at(&base, other.track.id).unwrap(), None);
+        let connection = open_catalog(&app_root(&base).unwrap()).unwrap();
+        connection.execute("DELETE FROM audio_metadata WHERE track_id=?1", [second.track.id]).unwrap();
+        assert_eq!(artwork_for_track_at(&base, second.track.id).unwrap().unwrap().bytes, cover);
         let _ = fs::remove_dir_all(base);
     }
 

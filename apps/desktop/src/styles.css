@@ -27,9 +27,7 @@ button:disabled { cursor: not-allowed; }
 
 .sidebar { position: relative; display: flex; flex-direction: column; min-width: 0; padding: 25px 14px 18px; border: 1px solid var(--line); border-radius: 16px; background: #101210; }
 .brand { display: flex; align-items: center; gap: 12px; margin: 0 11px 35px; color: var(--text); text-decoration: none; font-family: Manrope, sans-serif; font-size: 20px; font-weight: 800; letter-spacing: -.8px; }
-.brand-mark { display: flex; align-items: center; justify-content: center; gap: 2px; width: 27px; height: 27px; border-radius: 9px; background: var(--lime); transform: rotate(-7deg); }
-.brand-mark span { width: 3px; border-radius: 3px; background: #1d2714; }
-.brand-mark span:nth-child(1) { height: 8px; }.brand-mark span:nth-child(2) { height: 15px; }.brand-mark span:nth-child(3) { height: 11px; }
+.brand-logo { display: block; width: 29px; height: 29px; flex: none; border: 1px solid #ffffff20; border-radius: 7px; object-fit: contain; }
 .primary-nav { display: grid; gap: 5px; }
 .nav-item { display: flex; align-items: center; gap: 14px; min-height: 46px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: #a5aaa2; text-align: left; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .18s ease, color .18s ease; }
 .nav-item:hover { background: rgba(255,255,255,.045); color: #fff; }.nav-active { background: #1a1e19; color: var(--lime); }
@@ -204,7 +202,8 @@ h1, h2, p { margin-top: 0; }.welcome-row h1, .page-heading h1, .liked-hero h1 { 
 @media (max-width: 760px) {
   .app-shell { min-height: 0; }
   .topbar { height: 60px; padding: 0 16px; }
-  .mobile-brand { display: block; color: #f2f5ed; font: 800 19px Manrope, sans-serif; letter-spacing: -.5px; }
+  .mobile-brand { display: inline-flex; align-items: center; gap: 8px; color: #f2f5ed; font: 800 19px Manrope, sans-serif; letter-spacing: -.5px; }
+  .mobile-brand img { width: 28px; height: 28px; border: 1px solid #ffffff20; border-radius: 7px; object-fit: contain; }
   .topbar-right { gap: 0; }
   .top-search { min-width: 44px; width: 44px; min-height: 44px; justify-content: center; padding: 0; border-radius: 50%; }
   .top-search span, .top-search kbd, .local-badge, .profile-button { display: none; }
@@ -352,8 +351,6 @@ h1, h2, p { margin-top: 0; }.welcome-row h1, .page-heading h1, .liked-hero h1 { 
 
 body, .app-shell { background: var(--bg); }
 .sidebar { background: #141619; }
-.brand-mark { background: #c4c8cb; }
-.brand-mark span { background: #25292c; }
 .nav-active { background: #23272b; color: var(--lime); }
 .sidebar-library .playlist-empty { background: #ffffff08; }
 .sidebar-liked-art { background: #35393e; color: #d2d5d8; }
@@ -667,4 +664,126 @@ body, .app-shell { background: var(--bg); }
   .playlist-entry-position, .playlist-entry-row > .album-art, .playlist-entry-copy { grid-row: 1; }
   .playlist-entry-remove { grid-column: 5; grid-row: 1; }
   .playlist-order-controls { grid-column: 3 / 5; grid-row: 2; }
+}
+
+/* Matte iPod surface and fixed click-wheel control geometry. */
+.ipod-body {
+  border-color: #858a8b;
+  background: linear-gradient(105deg, #aeb2b3 0%, #c9cccd 19%, #b8bcbd 49%, #c9cccd 76%, #aeb2b3 100%);
+  box-shadow: 0 24px 48px #0009, inset 0 1px 1px #ffffff88, inset 0 -5px 10px #5b606166, 0 0 0 1px #737879;
+}
+.ipod-body::before { border-color: #ffffff38; box-shadow: inset 0 0 0 1px #747a7b24; }
+.ipod-body::after { opacity: .18; box-shadow: none; }
+.ipod-screen { box-shadow: inset 0 0 0 1px #050808, inset 0 4px 12px #000, 0 1px 1px #ffffff45; }
+.ipod-screen::after { background: none; }
+.click-wheel {
+  background: linear-gradient(145deg, #d9dbdb 0%, #c7caca 48%, #d5d7d7 100%);
+  box-shadow: 0 5px 10px #4445, inset 0 1px 1px #ffffff95, inset 0 -2px 4px #74797a45;
+  touch-action: manipulation;
+}
+.wheel-ring { border-color: #95999a; box-shadow: inset 0 0 0 1px #777c7d26, 0 0 0 1px #ffffff42; }
+.wheel-action, .wheel-menu, .wheel-center {
+  z-index: 2;
+  color: #666b6c;
+  text-shadow: none;
+  transition: color .12s ease, background-color .12s ease;
+  touch-action: manipulation;
+}
+.wheel-action { width: 48px; height: 48px; border-radius: 50%; }
+.wheel-action:hover, .wheel-action:focus-visible, .wheel-focused, .wheel-action:active { color: #34393a; background: #777d7d12; text-shadow: none; transform: none; }
+.wheel-menu { top: 14px; right: 0; left: 0; width: 76px; height: 48px; margin: auto; transform: none; border-radius: 24px; font-size: 11px; }
+.wheel-menu:hover, .wheel-menu:active { color: #34393a; background: #777d7d12; }
+.wheel-prev { top: calc(50% - 24px); left: 14px; }
+.wheel-next { top: calc(50% - 24px); right: 14px; bottom: auto; left: auto; }
+.wheel-play { right: 0; bottom: 12px; left: 0; margin: auto; }
+.wheel-center {
+  z-index: 1;
+  width: 88px;
+  height: 88px;
+  border-color: #969b9c;
+  background: linear-gradient(145deg, #c3c6c7, #b7bbbc 55%, #c5c8c9);
+  box-shadow: 0 2px 4px #656a6b45, inset 0 1px 1px #ffffff66;
+  color: #575c5d;
+  touch-action: manipulation;
+}
+.wheel-center:hover, .wheel-center:active { background: linear-gradient(145deg, #c3c6c7, #b7bbbc 55%, #c5c8c9); transform: none; }
+.wheel-menu:focus-visible, .wheel-action:focus-visible, .wheel-center:focus-visible { outline: 3px solid #36452b; outline-offset: 2px; }
+.wheel-announcement { color: #626768; }
+.ipod-progress {
+  display: grid;
+  width: 100%;
+  height: auto;
+  grid-template-columns: auto minmax(44px, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  margin-top: 9px;
+  border-radius: 0;
+  background: none;
+  color: #c5cbca;
+  font: 9px 'DM Mono', monospace;
+}
+.ipod-progress > span { display: block; width: auto; height: auto; overflow: visible; background: none; color: inherit; white-space: nowrap; }
+.ipod-progress input, .seek-row input {
+  width: 100%;
+  min-width: 44px;
+  min-height: 44px;
+  margin: 0;
+  padding: 0;
+  accent-color: #c4c9cc;
+  touch-action: pan-x;
+}
+.ipod-progress input:disabled, .seek-row input:disabled { cursor: not-allowed; }
+.now-track-open {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 11px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.now-track-open:disabled { cursor: default; }
+.now-track-open:not(:disabled):hover .now-copy strong { color: #fff; }
+.now-track-open:focus-visible { outline: 2px solid var(--lime); outline-offset: 3px; }
+.now-track-open .mini-art { flex: none; }
+.now-track-open .now-copy { flex: 1; }
+.now-track-open .now-copy span { display: block; }
+.seek-row { min-height: 32px; }
+.player-close { width: 44px; height: 44px; }
+
+@media (max-width: 760px) {
+  .player-scrim { background: #121416f5; backdrop-filter: none; }
+  .ipod-stage { padding-top: max(54px, env(safe-area-inset-top)); padding-bottom: max(36px, env(safe-area-inset-bottom)); }
+  .ipod-body { width: min(370px, calc(100vw - 32px)); }
+  .click-wheel { width: min(285px, 76vw); height: min(285px, 76vw); }
+  .wheel-prev { left: 10px; }
+  .wheel-next { right: 10px; }
+  .wheel-play { bottom: 9px; }
+  .wheel-center { width: 84px; height: 84px; }
+  .ipod-progress { min-height: 34px; }
+  .now-track-open { min-height: 44px; }
+}
+
+/* Embedded covers are cropped square and remain subordinate to their labels. */
+.artwork-loaded { background: #1c1e20; }
+.artwork img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.collection-art .artwork-card { height: 100%; }
+.album-detail-heading { display: grid; grid-template-columns: 190px minmax(0, 1fr); align-items: end; gap: 24px; margin: 8px 0 30px; }
+.album-detail-heading > .artwork-large { grid-row: 2; width: 190px; height: 190px; aspect-ratio: 1; border-radius: 7px; box-shadow: 0 12px 30px #0007; }
+.album-detail-heading > div:not(.artwork) { grid-column: 2; grid-row: 2; }
+.album-detail-heading .eyebrow { margin: 0 0 9px; }
+.album-detail-heading h1 { margin: 0; color: var(--text); font-size: clamp(30px, 5vw, 54px); letter-spacing: -.055em; line-height: 1.04; }
+.album-detail-heading p:last-child { margin: 12px 0 0; color: var(--muted); }
+.album-detail-back { grid-column: 1 / -1; justify-self: start; padding: 0; border: 0; background: none; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.album-detail-back:hover { color: var(--text); }
+@media (max-width: 600px) {
+  .album-detail-heading { grid-template-columns: 116px minmax(0, 1fr); gap: 15px; margin-bottom: 22px; }
+  .album-detail-heading > .artwork-large { width: 116px; height: 116px; }
+  .album-detail-heading h1 { font-size: 27px; }
+  .album-detail-heading p:last-child { font-size: 11px; }
 }

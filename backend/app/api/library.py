@@ -8,8 +8,9 @@ from pydantic import BaseModel
 from starlette.responses import Response, StreamingResponse
 
 from ..config import Settings
-from ..database import get_track, list_tracks
+from ..database import connect, get_track, list_tracks
 from ..library.audio import AudioFileAccessError, open_library_audio, read_audio_range
+from ..library.metadata import read_embedded_artwork
 from ..library.scanner import ScanPathError, scan_directory
 
 
@@ -40,6 +41,54 @@ def track(track_id: int, settings: Settings = Depends(get_settings)) -> dict:
     if item is None:
         raise HTTPException(status_code=404, detail="Track not found")
     return item
+
+
+@router.get("/tracks/{track_id}/artwork")
+def track_artwork(track_id: int, settings: Settings = Depends(get_settings)):
+    """Return embedded track art, then art from an exact album/artist sibling.
+
+    The caller supplies only a library ID. Files are opened through the same
+    permitted-root and no-symlink checks as playback, and no local path leaves
+    the API. Artwork bytes are bounded by read_embedded_artwork.
+    """
+    if track_id < 1:
+        raise HTTPException(status_code=404, detail="Artwork is unavailable")
+    item = get_track(settings.database_path, track_id)
+    if item is None or item["is_missing"]:
+        raise HTTPException(status_code=404, detail="Artwork is unavailable")
+
+    candidate_paths = [item["path"]]
+    album = item.get("album")
+    if album and album.strip():
+        with connect(settings.database_path) as connection:
+            peers = connection.execute(
+                "SELECT path FROM tracks WHERE id != ? AND album = ? COLLATE NOCASE "
+                "AND artist IS ? ORDER BY id LIMIT 24",
+                (track_id, album, item.get("artist")),
+            ).fetchall()
+        candidate_paths.extend(row["path"] for row in peers)
+
+    for path in candidate_paths:
+        try:
+            descriptor, _size, _audio_type = open_library_audio(path, settings)
+        except AudioFileAccessError:
+            continue
+        try:
+            with os.fdopen(descriptor, "rb", closefd=True) as source:
+                artwork = read_embedded_artwork(source)
+        except OSError:
+            continue
+        if artwork is not None:
+            data, mime_type = artwork
+            return Response(
+                content=data,
+                media_type=mime_type,
+                headers={
+                    "Cache-Control": "private, max-age=3600",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+    raise HTTPException(status_code=404, detail="Artwork is unavailable")
 
 
 def _parse_byte_range(value: str, size: int) -> tuple[int, int] | None:

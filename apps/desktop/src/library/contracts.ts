@@ -85,6 +85,8 @@ export interface BackupAdapter {
 export interface LibraryAdapter {
   listTracks(offset?: number, signal?: AbortSignal): Promise<TrackResponse>;
   getTrack(trackId: number, signal?: AbortSignal): Promise<Track>;
+  /** Artwork lookup is keyed by a library ID; filesystem paths stay platform-private. */
+  getTrackArtwork?(trackId: number): Promise<Blob | null>;
   importAudio?(): Promise<AudioImportResult>;
   scanAudioFolder?(): Promise<{ status: "cancelled" } | { status: "scanned"; result: FolderScanResult }>;
   previewSpotifyCsv?(file?: File): Promise<SpotifyCsvPreviewResult>;

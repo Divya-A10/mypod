@@ -75,6 +75,19 @@ test("iOS adapter reports a native duplicate without changing its track identity
   assert.deepEqual(await adapter.importAudio(), { status: "duplicate", track });
 });
 
+test("iOS artwork lookup uses only a library track ID and validates the native payload", async () => {
+  const payload = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]).buffer;
+  const { adapter, calls } = makeAdapter({ invoke: async (...args) => { calls.invoke.push(args); return payload; } });
+  const blob = await adapter.getTrackArtwork(7);
+  assert.equal(blob.type, "image/png");
+  assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [...new Uint8Array(payload)]);
+  assert.deepEqual(calls.invoke, [["get_track_artwork", { trackId: 7 }]]);
+
+  const invalid = makeAdapter({ invoke: async () => ({ mime_type: "text/plain", bytes: [1] }) });
+  await assert.rejects(invalid.adapter.getTrackArtwork(7), /invalid artwork/);
+  await assert.rejects(invalid.adapter.getTrackArtwork(0), /valid library track ID/);
+});
+
 test("iOS import rejects unsupported locations, unsupported files, and non-regular files", async () => {
   const external = makeAdapter({ open: async () => "https://example.test/audio.wav" });
   await assert.rejects(external.adapter.importAudio(), /unsupported location/);

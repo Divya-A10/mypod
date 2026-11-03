@@ -9,6 +9,11 @@ type NativePlaybackSnapshot = {
   loading: boolean;
   ended: boolean;
   error: string | null;
+  ready?: boolean;
+  player_status?: string;
+  item_status?: string;
+  time_control_status?: string;
+  failure_code?: number | null;
 };
 
 type Dependencies = {
@@ -27,6 +32,7 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
   private snapshot: NativePlaybackSnapshot | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
+  private lastDiagnosticState: string | null = null;
 
   constructor(private readonly dependencies: Dependencies = defaults) {}
 
@@ -53,6 +59,7 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
         reload: this.reloadRequested,
       });
       this.reloadRequested = false;
+      console.info("MyPod iOS playback: native play command accepted");
     } catch {
       console.warn("MyPod iOS playback: native play command failed");
       throw new Error("The iPhone could not start this track.");
@@ -102,20 +109,43 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
     this.polling = true;
     try {
       const next = await this.dependencies.invoke<NativePlaybackSnapshot>("local_playback_state");
-      if (next.track_id !== this.trackId) return;
+      if (next.track_id !== this.trackId) {
+        console.warn("MyPod iOS playback: native state track did not match the requested track");
+        return;
+      }
       const previous = this.snapshot;
       this.snapshot = next;
+      const diagnosticState = [next.player_status, next.item_status, next.time_control_status, next.ready, next.duration !== null, next.playing, next.loading, Boolean(next.error), next.failure_code ?? ""].join("|");
+      if (diagnosticState !== this.lastDiagnosticState) {
+        console.info("MyPod iOS playback: native state", {
+          playerStatus: next.player_status ?? "unknown",
+          itemStatus: next.item_status ?? "unknown",
+          timeControlStatus: next.time_control_status ?? "unknown",
+          ready: Boolean(next.ready),
+          durationAvailable: next.duration !== null,
+          playing: next.playing,
+          loading: next.loading,
+          failed: Boolean(next.error),
+          failureCode: next.failure_code ?? null,
+        });
+        this.lastDiagnosticState = diagnosticState;
+      }
 
       if (next.duration !== previous?.duration) this.emit("metadata");
       if (next.current_time !== previous?.current_time) this.emit("timeupdate");
       if (next.error && !previous?.error) {
         // AVPlayer failure alone does not prove that the codec is unsupported.
-        this.emit("error");
+        console.error("MyPod iOS playback: native media failure", { failureCode: next.failure_code ?? null });
+        const message = next.failure_code === null || next.failure_code === undefined
+          ? "iOS could not load this audio file. Try another file or re-import it."
+          : `iOS could not load this audio file (AVFoundation error ${next.failure_code}).`;
+        this.emit("error", false, message);
         this.stopPolling();
       } else if (next.ended && !previous?.ended) {
         this.emit("ended");
         this.stopPolling();
       } else if (next.playing && !previous?.playing) {
+        console.info("MyPod iOS playback: native playback confirmed");
         this.emit("playing");
       } else if (previous?.playing && !next.playing) {
         this.emit("pause");
@@ -142,17 +172,19 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
       ended: false,
       error: message,
     };
-    this.emit("error");
+    console.error("MyPod iOS playback: native command or state query failed");
+    this.emit("error", false, message);
     this.stopPolling();
   }
 
-  private emit(type: PlaybackDriverEventType, unsupported = false): void {
+  private emit(type: PlaybackDriverEventType, unsupported = false, message?: string): void {
     const event: PlaybackDriverEvent = {
       type,
       currentTime: this.currentTime,
       duration: this.duration,
       paused: this.paused,
       unsupported,
+      ...(message ? { message } : {}),
     };
     for (const listener of this.listeners) listener(event);
   }

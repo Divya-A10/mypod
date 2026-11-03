@@ -65,6 +65,21 @@ export async function getTrack(trackId: number, signal?: AbortSignal): Promise<T
   return (await response.json()) as Track;
 }
 
+export async function getTrackArtwork(trackId: number): Promise<Blob | null> {
+  assertDesktopAdapterAvailable();
+  if (!Number.isSafeInteger(trackId) || trackId < 1) {
+    throw new Error("A valid library track ID is required");
+  }
+  const response = await fetch(`${apiBase}/tracks/${trackId}/artwork`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Artwork request failed (${response.status}).`);
+  const blob = await response.blob();
+  if (blob.size <= 0 || blob.size > 8 * 1024 * 1024 || !blob.type.startsWith("image/")) {
+    throw new Error("The library returned unsupported artwork.");
+  }
+  return blob;
+}
+
 export function getTrackAudioUrl(trackId: number): string {
   assertDesktopAdapterAvailable();
   if (!Number.isSafeInteger(trackId) || trackId < 1) {

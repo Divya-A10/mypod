@@ -10,6 +10,15 @@ const STAGING_DIR = "MyPod/Importing";
 const BACKUP_DIR = "MyPod/Backups";
 const SUPPORTED_EXTENSIONS = ["wav", "mp3", "m4a", "aac", "flac", "ogg", "aiff", "aif"];
 const CSV_PREVIEW_BUILD = "csv-preview-copy-2026-10-19-r2";
+const MAX_ARTWORK_BYTES = 8 * 1024 * 1024;
+
+function artworkMimeType(bytes: Uint8Array): string | null {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 8 && [137, 80, 78, 71, 13, 10, 26, 10].every((byte, index) => bytes[index] === byte)) return "image/png";
+  if (bytes.length >= 6 && (new TextDecoder().decode(bytes.subarray(0, 6)) === "GIF87a" || new TextDecoder().decode(bytes.subarray(0, 6)) === "GIF89a")) return "image/gif";
+  if (bytes.length >= 12 && new TextDecoder().decode(bytes.subarray(0, 4)) === "RIFF" && new TextDecoder().decode(bytes.subarray(8, 12)) === "WEBP") return "image/webp";
+  return null;
+}
 
 type IosImportResponse = { track: Track; duplicate: boolean; metadata_warning?: string | null };
 type IosLibraryAdapterDependencies = {
@@ -118,6 +127,16 @@ export function createIosLibraryAdapter(dependencies = defaultDependencies): Lib
     async getTrack(trackId) {
       if (!Number.isSafeInteger(trackId) || trackId < 1) throw new Error("A valid library track ID is required");
       return dependencies.invoke<Track>("get_track", { trackId });
+    },
+    async getTrackArtwork(trackId) {
+      if (!Number.isSafeInteger(trackId) || trackId < 1) throw new Error("A valid library track ID is required");
+      const payload = await dependencies.invoke<ArrayBuffer>("get_track_artwork", { trackId });
+      if (!(payload instanceof ArrayBuffer) || payload.byteLength > MAX_ARTWORK_BYTES) throw new Error("The on-device catalog returned invalid artwork.");
+      if (payload.byteLength === 0) return null;
+      const bytes = new Uint8Array(payload);
+      const mimeType = artworkMimeType(bytes);
+      if (!mimeType) throw new Error("The on-device catalog returned unsupported artwork.");
+      return new Blob([bytes], { type: mimeType });
     },
     async importAudio(): Promise<AudioImportResult> {
       const selected = await dependencies.open({

@@ -1,6 +1,6 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getTrack, getTracks, previewSpotifyCsv, scanAudioFolder } from "../api";
+import { getTrack, getTrackArtwork, getTracks, previewSpotifyCsv, scanAudioFolder } from "../api";
 import type { LibraryAdapter, SpotifyCsvPreviewResult } from "./contracts";
 
 type DesktopAdapterDependencies = {
@@ -8,6 +8,7 @@ type DesktopAdapterDependencies = {
   openDirectory: () => Promise<string | string[] | null>;
   listTracks: typeof getTracks;
   getTrack: typeof getTrack;
+  getTrackArtwork: typeof getTrackArtwork;
   previewSpotifyCsv: typeof previewSpotifyCsv;
   scanAudioFolder: typeof scanAudioFolder;
 };
@@ -17,6 +18,7 @@ const defaultDependencies: DesktopAdapterDependencies = {
   openDirectory: async () => await open({ directory: true, multiple: false }),
   listTracks: getTracks,
   getTrack,
+  getTrackArtwork,
   previewSpotifyCsv,
   scanAudioFolder,
 };
@@ -26,6 +28,7 @@ export function createDesktopLibraryAdapter(dependencies = defaultDependencies):
   return {
     listTracks: dependencies.listTracks,
     getTrack: dependencies.getTrack,
+    getTrackArtwork: dependencies.getTrackArtwork,
     async previewSpotifyCsv(file): Promise<SpotifyCsvPreviewResult> {
       if (!file) throw new Error("Choose a CSV file to preview.");
       return { status: "previewed", preview: await dependencies.previewSpotifyCsv(file) };

@@ -10,7 +10,7 @@ const vite = await createServer({
   server: { middlewareMode: true },
 });
 const { createDesktopLibraryAdapter } = await vite.ssrLoadModule("/src/library/desktopLibraryAdapter.ts");
-const { MAX_SPOTIFY_CSV_BYTES, previewSpotifyCsv } = await vite.ssrLoadModule("/src/api.ts");
+const { MAX_SPOTIFY_CSV_BYTES, getTrackArtwork, previewSpotifyCsv } = await vite.ssrLoadModule("/src/api.ts");
 after(async () => vite.close());
 
 test("desktop/web adapter exposes preview only and does not offer iOS commands", () => {
@@ -83,6 +83,24 @@ test("CSV preview rejects unsupported extensions and oversized files before netw
     await assert.rejects(previewSpotifyCsv({ name: "not-csv.txt", size: 1 }), /Choose a CSV/);
     await assert.rejects(previewSpotifyCsv({ name: "large.csv", size: MAX_SPOTIFY_CSV_BYTES + 1 }), /10 MiB/);
     assert.equal(called, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("desktop artwork request uses a library track ID rather than a filesystem path", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (...args) => {
+    calls.push(args);
+    return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "Content-Type": "image/png" } });
+  };
+  try {
+    const blob = await getTrackArtwork(19);
+    assert.equal(blob.type, "image/png");
+    assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [1, 2, 3]);
+    assert.equal(calls[0][0], "/api/tracks/19/artwork");
+    await assert.rejects(getTrackArtwork(0), /valid library track ID/);
   } finally {
     globalThis.fetch = originalFetch;
   }

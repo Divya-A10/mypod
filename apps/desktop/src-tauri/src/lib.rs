@@ -44,6 +44,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ios_catalog::list_tracks,
             ios_catalog::get_track,
+            ios_catalog::get_track_artwork,
             ios_catalog::register_imported_track,
             ios_playlists::list_playlists,
             ios_playlists::create_playlist,

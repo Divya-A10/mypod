@@ -6,6 +6,7 @@ use objc2_avf_audio::{AVAudioSession, AVAudioSessionCategoryPlayback};
 use objc2_core_media::CMTime;
 use objc2_foundation::{NSString, NSURL};
 use serde::Serialize;
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Manager, State};
@@ -14,6 +15,7 @@ struct PlaybackInstance {
     track_id: Option<i64>,
     player: Option<objc2::rc::Retained<AVPlayer>>,
     failure_reported: bool,
+    last_reported_state: Option<String>,
 }
 
 // AVPlayer is only accessed by commands after MainThreadMarker confirms the
@@ -28,6 +30,7 @@ impl Default for IosPlaybackState {
             track_id: None,
             player: None,
             failure_reported: false,
+            last_reported_state: None,
         }))
     }
 }
@@ -41,6 +44,11 @@ pub struct NativePlaybackSnapshot {
     pub loading: bool,
     pub ended: bool,
     pub error: Option<String>,
+    pub ready: bool,
+    pub player_status: &'static str,
+    pub item_status: &'static str,
+    pub time_control_status: &'static str,
+    pub failure_code: Option<i64>,
 }
 
 fn main_thread() -> Result<MainThreadMarker, String> {
@@ -75,15 +83,20 @@ pub fn play_local_track(
     reload: bool,
 ) -> Result<(), String> {
     let marker = main_thread()?;
-    eprintln!("MyPod iOS playback: play request received");
+    eprintln!("MyPod iOS playback: play tapped; native command received");
     let app_local_data = app
         .path()
         .app_local_data_dir()
         .map_err(|_| "App-private storage is unavailable".to_string())?;
     let path = resolve_audio_path(app_local_data, track_id).map_err(|_| {
-        eprintln!("MyPod iOS playback: imported audio resolution failed");
+        eprintln!("MyPod iOS playback: track lookup or managed-file resolution failed");
         "The imported audio is missing or unavailable".to_string()
     })?;
+    File::open(&path).map_err(|_| {
+        eprintln!("MyPod iOS playback: track found but managed audio is not readable");
+        "The imported audio cannot be read by MyPod".to_string()
+    })?;
+    eprintln!("MyPod iOS playback: track found; managed audio is readable");
     configure_audio_session().map_err(|error| {
         eprintln!("MyPod iOS playback: audio session configuration failed");
         error
@@ -104,6 +117,8 @@ pub fn play_local_track(
         instance.player = Some(player);
         instance.track_id = Some(track_id);
         instance.failure_reported = false;
+        instance.last_reported_state = None;
+        eprintln!("MyPod iOS playback: AVPlayer initialized");
     }
 
     let player = instance
@@ -111,7 +126,7 @@ pub fn play_local_track(
         .as_ref()
         .ok_or_else(|| "Could not create the audio player".to_string())?;
     unsafe { player.play() };
-    eprintln!("MyPod iOS playback: AVPlayer play requested");
+    eprintln!("MyPod iOS playback: AVPlayer play requested; awaiting native state");
     Ok(())
 }
 
@@ -121,6 +136,7 @@ pub fn pause_local_playback(state: State<'_, IosPlaybackState>) -> Result<(), St
     let instance = state.0.lock().map_err(|_| "Playback is busy".to_string())?;
     if let Some(player) = instance.player.as_ref() {
         unsafe { player.pause() };
+        eprintln!("MyPod iOS playback: AVPlayer pause requested");
     }
     Ok(())
 }
@@ -161,6 +177,11 @@ pub fn local_playback_state(
             loading: false,
             ended: false,
             error: None,
+            ready: false,
+            player_status: "unavailable",
+            item_status: "unavailable",
+            time_control_status: "paused",
+            failure_code: None,
         });
     };
 
@@ -176,17 +197,38 @@ pub fn local_playback_state(
         .map(|item| unsafe { item.duration().seconds() })
         .filter(|duration| duration.is_finite() && *duration > 0.0);
     let player_status = unsafe { player.status() };
+    let player_status_name = if player_status == AVPlayerStatus::ReadyToPlay {
+        "ready"
+    } else if player_status == AVPlayerStatus::Failed {
+        "failed"
+    } else {
+        "unknown"
+    };
+    let item_status = item.as_ref().map(|item| unsafe { item.status() });
+    let item_status_name = match item_status {
+        Some(AVPlayerItemStatus::ReadyToPlay) => "ready",
+        Some(AVPlayerItemStatus::Failed) => "failed",
+        Some(_) => "unknown",
+        None => "unavailable",
+    };
     let item_failed = item
         .as_ref()
-        .is_some_and(|item| unsafe { item.status() == AVPlayerItemStatus::Failed });
+        .is_some_and(|_| item_status == Some(AVPlayerItemStatus::Failed));
     let media_failed = player_status == AVPlayerStatus::Failed || item_failed;
     let should_report_failure = media_failed && !instance.failure_reported;
     let error = if media_failed {
-        Some("This audio file could not be decoded by AVFoundation.".to_string())
+        Some("iOS could not load this audio file. Try another file or re-import it.".to_string())
     } else {
         None
     };
     let time_status = unsafe { player.timeControlStatus() };
+    let time_control_status_name = if time_status == AVPlayerTimeControlStatus::Playing {
+        "playing"
+    } else if time_status == AVPlayerTimeControlStatus::WaitingToPlayAtSpecifiedRate {
+        "waiting"
+    } else {
+        "paused"
+    };
     let playing = time_status == AVPlayerTimeControlStatus::Playing;
     let ended = !playing
         && duration.is_some_and(|duration| current_time + 0.1 >= duration)
@@ -195,10 +237,31 @@ pub fn local_playback_state(
         && !ended
         && error.is_none()
         && (player_status == AVPlayerStatus::Unknown
+            || item_status.is_none_or(|status| status == AVPlayerItemStatus::Unknown)
             || time_status == AVPlayerTimeControlStatus::WaitingToPlayAtSpecifiedRate);
 
+    let failure_code = item
+        .as_ref()
+        .and_then(|item| unsafe { item.error() })
+        .or_else(|| unsafe { player.error() })
+        .map(|error| error.code() as i64);
+
+    let ready = player_status == AVPlayerStatus::ReadyToPlay
+        && item_status == Some(AVPlayerItemStatus::ReadyToPlay);
+    let diagnostic_state = format!(
+        "player={player_status_name},item={item_status_name},time={time_control_status_name},ready={ready},duration={}",
+        duration.is_some()
+    );
+    if instance.last_reported_state.as_deref() != Some(&diagnostic_state) {
+        eprintln!("MyPod iOS playback: state {diagnostic_state}");
+        instance.last_reported_state = Some(diagnostic_state);
+    }
+
     if should_report_failure {
-        eprintln!("MyPod iOS playback: AVPlayer reported a media failure");
+        eprintln!(
+            "MyPod iOS playback: AVPlayer reported a media failure; code={}",
+            failure_code.map_or_else(|| "unavailable".to_string(), |code| code.to_string())
+        );
         instance.failure_reported = true;
     }
 
@@ -210,5 +273,10 @@ pub fn local_playback_state(
         loading,
         ended,
         error,
+        ready,
+        player_status: player_status_name,
+        item_status: item_status_name,
+        time_control_status: time_control_status_name,
+        failure_code,
     })
 }

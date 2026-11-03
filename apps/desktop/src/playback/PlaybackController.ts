@@ -16,6 +16,8 @@ export type PlaybackDriverEvent = {
   duration: number;
   paused: boolean;
   unsupported: boolean;
+  /** Safe, user-facing error detail supplied by the platform driver. */
+  message?: string;
 };
 
 /** Platform media operations consumed by the shared playback controller. */
@@ -368,9 +370,9 @@ export class PlaybackController {
     this.startIntent = null;
     this.update({
       phase: "error",
-      error: event.unsupported
+      error: event.message || (event.unsupported
         ? "This audio format is not supported by the current player."
-        : "This track could not be loaded. The file may be missing or its format unsupported.",
+        : "This track could not be loaded. The file may be missing or its format unsupported."),
     });
   };
 }

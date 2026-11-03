@@ -49,6 +49,47 @@ pub(crate) fn read_metadata(path: &Path) -> Metadata {
         ..Metadata::default()
     })
 }
+
+/// Read only the first supported, bounded embedded image. Callers provide an
+/// already validated app-managed audio path and never expose that path to JS.
+pub(crate) fn read_cover_art(path: &Path) -> Option<(Vec<u8>, String)> {
+    const MAX_ARTWORK_BYTES: usize = 8 * 1024 * 1024;
+    lofty::config::apply_global_options(
+        lofty::config::GlobalOptions::new()
+            .allocation_limit(MAX_ARTWORK_BYTES)
+            .use_custom_resolvers(false),
+    );
+    let tagged = Probe::open(path)
+        .ok()?
+        .guess_file_type()
+        .ok()?
+        .options(
+            ParseOptions::new()
+                .read_properties(false)
+                .read_cover_art(true),
+        )
+        .read()
+        .ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    tag.pictures().iter().find_map(|picture| {
+        let data = picture.data();
+        if data.is_empty() || data.len() > MAX_ARTWORK_BYTES {
+            return None;
+        }
+        let mime = if data.starts_with(b"\xff\xd8\xff") {
+            "image/jpeg"
+        } else if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+            "image/png"
+        } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+            "image/gif"
+        } else if data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+            "image/webp"
+        } else {
+            return None;
+        };
+        Some((data.to_vec(), mime.to_string()))
+    })
+}
 fn norm(s: &str) -> String {
     s.split_whitespace()
         .collect::<Vec<_>>()
@@ -307,6 +348,26 @@ pub async fn set_audio_match(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lofty::{picture::{MimeType, Picture, PictureType}, tag::{Tag, TagExt, TagType}};
+
+    fn synthetic_wav(path: &Path) {
+        let samples = vec![128_u8; 96];
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36_u32 + samples.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&8_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&8_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&8_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&samples);
+        std::fs::write(path, bytes).unwrap();
+    }
     fn metadata(title: &str) -> Metadata {
         Metadata {
             title: Some(title.into()),
@@ -336,6 +397,30 @@ mod tests {
         b = a.clone();
         b.artist = Some("Cover artist".into());
         assert!(!strong(&a, &b));
+    }
+
+    #[test]
+    fn reads_bounded_embedded_id3_artwork_and_returns_none_when_absent() {
+        let base = std::env::temp_dir().join(format!("mypod-art-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("cover.wav");
+        synthetic_wav(&path);
+        let expected = b"\x89PNG\r\n\x1a\nsynthetic-cover".to_vec();
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.push_picture(Picture::new_unchecked(
+            PictureType::CoverFront,
+            Some(MimeType::Png),
+            None,
+            expected.clone(),
+        ));
+        tag.save_to_path(&path, lofty::config::WriteOptions::default()).unwrap();
+        assert_eq!(read_cover_art(&path), Some((expected, "image/png".into())));
+
+        let plain = base.join("plain.wav");
+        synthetic_wav(&plain);
+        assert_eq!(read_cover_art(&plain), None);
+        let _ = std::fs::remove_dir_all(base);
     }
     #[test]
     fn embedded_tags_link_all_memberships_manual_unlink_and_missing_audio() {

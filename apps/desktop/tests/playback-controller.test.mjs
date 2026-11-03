@@ -247,6 +247,37 @@ test("playback errors retain safe platform-specific messages", async () => {
   assert.equal(controller.getSnapshot().error, "The iPhone could not start this track.");
 });
 
+test("shared controller surfaces safe native error details instead of replacing them", async () => {
+  const listeners = new Set();
+  const driver = {
+    paused: true,
+    currentTime: 0,
+    duration: 0,
+    load() {},
+    async play() {
+      for (const listener of listeners) listener({ type: "error", currentTime: 0, duration: 0, paused: true, unsupported: false, message: "iOS could not load this audio file (AVFoundation error -11828)." });
+    },
+    pause() {},
+    seek() {},
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+  };
+  const controller = new PlaybackController(driver, new PlaybackQueue());
+  await controller.play(track(23));
+  assert.equal(controller.getSnapshot().phase, "error");
+  assert.match(controller.getSnapshot().error, /AVFoundation error -11828/);
+});
+
+test("playback progress follows media events and seek uses the shared media driver", async () => {
+  const { media, controller } = setup();
+  await controller.play(track(24));
+  media.currentTime = 6.5;
+  assert.equal(controller.getSnapshot().currentTime, 6.5);
+  controller.seek(19);
+  assert.equal(media.currentTime, 19);
+  controller.seek(45);
+  assert.equal(media.currentTime, media.duration);
+});
+
 test("a media error leaves the queued item pending and retryable", async () => {
   const { media, controller } = setup();
   controller.enqueue(track(25));

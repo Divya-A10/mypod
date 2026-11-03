@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type ChangeEvent } from "react";
+import myPodLogo from "./assets/mypod-logo.png";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { formatDuration, type Track } from "./api";
 import { libraryAdapter } from "./library/libraryAdapter";
@@ -6,8 +7,9 @@ import { isIOSPlatform } from "./platform";
 import type { AudioMatchReview, BackupScope, BackupSummary, IosRuntimeDiagnostics, Playlist, PlaylistEntry, SpotifyCsvPreview } from "./library/contracts";
 import type { PlaybackSnapshot } from "./playback/PlaybackController";
 import { playbackAvailable, playbackController } from "./playback/runtime";
+import { loadTrackArtwork } from "./library/artwork";
 
-type View = "Home" | "Search" | "Your Library" | "Liked Songs";
+type View = "Home" | "Search" | "Your Library" | "Liked Songs" | "Album";
 const SPOTIFY_PREVIEW_PAGE_SIZE = 50;
 type IconName = "home" | "search" | "library" | "heart" | "plus" | "arrow-left" | "arrow-right" | "play" | "pause" | "previous" | "next" | "volume" | "close" | "music" | "disc" | "artist" | "shuffle" | "repeat" | "menu" | "chevron" | "refresh" | "queue";
 
@@ -40,16 +42,31 @@ function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
   return <svg {...shared}>{paths[name]}</svg>;
 }
 
-function artworkHue(seed: string): number {
-  let hash = 0;
-  for (const character of seed) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
-  return hash % 360;
-}
+function Art({ label, size = "card", trackId, eager = false }: { label: string; size?: "card" | "small" | "large"; trackId?: number | null; eager?: boolean }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [loadedArtwork, setLoadedArtwork] = useState<{ trackId: number; src: string | null } | null>(null);
+  useEffect(() => {
+    let active = true;
+    if (!trackId || trackId < 1) return () => { active = false; };
+    const load = () => void loadTrackArtwork(trackId).then((url) => { if (active) setLoadedArtwork({ trackId, src: url }); });
+    if (eager || typeof IntersectionObserver === "undefined" || !hostRef.current) load();
+    else {
+      const observer = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer.disconnect();
+          load();
+        }
+      }, { rootMargin: "240px" });
+      observer.observe(hostRef.current);
+      return () => { active = false; observer.disconnect(); };
+    }
+    return () => { active = false; };
+  }, [eager, trackId]);
 
-function Art({ label, size = "card" }: { label: string; size?: "card" | "small" | "large" }) {
-  const hue = artworkHue(label || "MyPod");
+  const src = loadedArtwork && loadedArtwork.trackId === trackId ? loadedArtwork.src : null;
+  if (src) return <div ref={hostRef} className={`artwork artwork-${size} artwork-loaded`} role="img" aria-label={`Cover art for ${label}`}><img src={src} alt="" decoding="async" /></div>;
   return (
-    <div className={`artwork artwork-${size}`} style={{ "--art-hue": hue } as CSSProperties} aria-hidden="true">
+    <div ref={hostRef} className={`artwork artwork-${size}`} style={{ "--art-hue": 218 } as CSSProperties} role="img" aria-label={`MyPod placeholder artwork for ${label}`}>
       <span className="art-orbit art-orbit-one" />
       <span className="art-orbit art-orbit-two" />
       <span className="art-core"><Icon name="music" size={size === "small" ? 16 : 26} /></span>
@@ -64,7 +81,7 @@ function TrackRow({ track, index, selected, playback, playbackEnabled, onSelect,
   return (
     <div className={`track-row${selected ? " track-selected" : ""}${isPlaying ? " track-playing" : ""}`} role="listitem">
       <span className="track-index">{index + 1}</span>
-      <Art label={track.album || track.title} size="small" />
+      <Art label={track.album || track.title} size="small" trackId={track.id} />
       <div className="track-row-copy">
         <button className="track-title-select" type="button" aria-pressed={selected} onClick={() => onSelect(track)} aria-label={`Select ${track.title} for the player`}>
           {track.title}
@@ -81,10 +98,70 @@ function TrackRow({ track, index, selected, playback, playbackEnabled, onSelect,
   );
 }
 
-function CollectionCard({ title, subtitle, shape = "square", icon = "disc" as IconName, onClick }: { title: string; subtitle: string; shape?: "square" | "circle"; icon?: IconName; onClick?: () => void }) {
+function PlaybackSeekBar({ playback, playbackEnabled, label, onSeek, className = "ipod-progress" }: { playback: PlaybackSnapshot; playbackEnabled: boolean; label: string; onSeek: (seconds: number) => void; className?: string }) {
+  const rangeRef = useRef<HTMLInputElement>(null);
+  const pointerActive = useRef(false);
+  const [draft, setDraft] = useState<number | null>(null);
+  const duration = playback.duration && playback.duration > 0 ? playback.duration : null;
+  const current = draft ?? Math.min(playback.currentTime, duration ?? 0);
+  const canSeek = playbackEnabled && Boolean(playback.track) && duration !== null && playback.phase !== "error";
+  const commit = () => {
+    if (!pointerActive.current) return;
+    pointerActive.current = false;
+    const value = Number(rangeRef.current?.value);
+    if (Number.isFinite(value)) onSeek(value);
+    setDraft(null);
+  };
+  const interactKeys = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
+
+  useEffect(() => {
+    setDraft(null);
+    pointerActive.current = false;
+  }, [playback.track?.id]);
+
+  return <div className={className}>
+    <span>{formatDuration(current)}</span>
+    <input
+      ref={rangeRef}
+      type="range"
+      min="0"
+      max={duration ?? 1}
+      step="0.1"
+      value={current}
+      disabled={!canSeek}
+      aria-label={label}
+      aria-valuetext={`${formatDuration(current)} of ${duration ? formatDuration(duration) : "unknown duration"}`}
+      onPointerDown={(event) => {
+        if (!canSeek) return;
+        pointerActive.current = true;
+        setDraft(Number(event.currentTarget.value));
+        try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* WebView may manage capture itself. */ }
+      }}
+      onPointerUp={commit}
+      onPointerCancel={commit}
+      onLostPointerCapture={commit}
+      onKeyDown={(event) => {
+        if (interactKeys.has(event.key)) {
+          pointerActive.current = true;
+          setDraft(Number(event.currentTarget.value));
+        }
+      }}
+      onKeyUp={(event) => { if (interactKeys.has(event.key)) commit(); }}
+      onBlur={commit}
+      onChange={(event) => {
+        const value = Number(event.currentTarget.value);
+        if (pointerActive.current) setDraft(value);
+        else onSeek(value);
+      }}
+    />
+    <span>{duration ? formatDuration(duration) : "--:--"}</span>
+  </div>;
+}
+
+function CollectionCard({ title, subtitle, shape = "square", icon = "disc" as IconName, onClick, artworkTrackId }: { title: string; subtitle: string; shape?: "square" | "circle"; icon?: IconName; onClick?: () => void; artworkTrackId?: number }) {
   return (
     <button className="collection-card" onClick={onClick} type="button">
-      <span className={`collection-art collection-art-${shape}`}><span className="collection-glow" /><Icon name={icon} size={30} /></span>
+      <span className={`collection-art collection-art-${shape}`}>{artworkTrackId ? <Art label={title} size="card" trackId={artworkTrackId} /> : <><span className="collection-glow" /><Icon name={icon} size={30} /></>}</span>
       <span className="collection-title">{title}</span>
       <span className="collection-subtitle">{subtitle}</span>
     </button>
@@ -114,7 +191,7 @@ function handlePlaylistGalleryKeyDown(event: ReactKeyboardEvent<HTMLDivElement>)
   });
 }
 
-function IpodPlayer({ onClose, selectedTrack, playback, playbackEnabled }: { onClose: () => void; selectedTrack: Track | null; playback: PlaybackSnapshot; playbackEnabled: boolean }) {
+function IpodPlayer({ onClose, onCenterSelect, selectedTrack, playback, playbackEnabled }: { onClose: () => void; onCenterSelect: () => void; selectedTrack: Track | null; playback: PlaybackSnapshot; playbackEnabled: boolean }) {
   const closeButton = useRef<HTMLButtonElement>(null);
   const displayTrack = playback.track || selectedTrack;
 
@@ -154,25 +231,25 @@ function IpodPlayer({ onClose, selectedTrack, playback, playbackEnabled }: { onC
         <div className="ipod-body">
           <div className="ipod-header"><span className="ipod-brand">MyPod</span><span className="ipod-mark" aria-hidden="true">∞</span></div>
           <div className="ipod-screen">
-            <div className="ipod-screen-art"><Art label={displayTrack?.album || displayTrack?.title || "MyPod player"} size="large" /></div>
+            <div className="ipod-screen-art"><Art label={displayTrack?.album || displayTrack?.title || "MyPod player"} size="large" trackId={displayTrack?.id} eager /></div>
             <div className="ipod-screen-meta">
               <span className="ipod-screen-label">{playback.track ? playback.phase : selectedTrack ? "Selected track" : "MyPod player"}</span>
               <strong id="ipod-title">{displayTrack?.title || "No track selected"}</strong>
               <span>{displayTrack ? `${displayTrack.artist || "Unknown artist"} · ${displayTrack.album || "Unknown album"}` : "Choose a track from your library to view its details here."}</span>
-              <span className="ipod-playback-state" id="ipod-description">{playbackEnabled ? (playback.error || (playback.track ? "Audio state is reported by the player." : selectedTrack ? "Selected only. Press play to start audio." : "Choose a track, then press play.")) : "iPhone import is available. Native audio playback is a later stage."}</span>
-              <div className="ipod-progress"><span>{formatDuration(playback.currentTime)}</span><input type="range" min="0" max={playback.duration || 1} value={Math.min(playback.currentTime, playback.duration || 0)} disabled={!playbackEnabled || !playback.track || !playback.duration || playback.phase === "error"} onChange={(event) => playbackController.seek(Number(event.target.value))} aria-label="Seek playback"/><span>{formatDuration(playback.duration)}</span></div>
+              <span className="ipod-playback-state" id="ipod-description" role={playback.error ? "alert" : "status"} aria-live="polite">{playbackEnabled ? (playback.error || (playback.track ? "Audio state is reported by the player." : selectedTrack ? "Selected only. Press play to start audio." : "Choose a track, then press play.")) : "iPhone import is available. Native audio playback is a later stage."}</span>
+              <PlaybackSeekBar key={playback.track?.id ?? "no-track"} playback={playback} playbackEnabled={playbackEnabled} label="Seek playback" onSeek={(seconds) => playbackController.seek(seconds)} />
             </div>
           </div>
           <div className="click-wheel" role="group" aria-label="Player click wheel controls">
             <span className="wheel-ring" aria-hidden="true" />
             <button className="wheel-menu" onClick={onClose} type="button" aria-label="Menu: close player">MENU</button>
-            <button className="wheel-action wheel-prev" type="button" disabled={!playbackEnabled || !playback.track} onClick={() => void playbackController.previous()} aria-label="Previous track"><Icon name="previous" size={20} /><span>PREV</span></button>
-            <button className="wheel-action wheel-next" type="button" disabled={!playbackEnabled || playback.queue.length === 0} onClick={() => void playbackController.next()} aria-label={playback.queue.length ? "Play next queued track" : "Next track unavailable: queue is empty"}><Icon name="next" size={20} /><span>NEXT</span></button>
-            <button className="wheel-action wheel-play" type="button" disabled={!playbackEnabled || !displayTrack} onClick={() => playbackController.toggle(displayTrack)} aria-label={playback.phase === "playing" ? "Pause playback" : "Play playback"}><Icon name={playback.phase === "playing" ? "pause" : "play"} size={19} /><span>{playback.phase === "playing" ? "PAUSE" : "PLAY"}</span></button>
-            <button className="wheel-center" type="button" disabled title="There is no player menu or selection action yet" aria-label="Center select unavailable">SELECT</button>
+            <button className="wheel-action wheel-prev" type="button" disabled={!playbackEnabled || !playback.track} onClick={() => void playbackController.previous()} aria-label="Previous track"><Icon name="previous" size={20} /></button>
+            <button className="wheel-action wheel-next" type="button" disabled={!playbackEnabled || playback.queue.length === 0} onClick={() => void playbackController.next()} aria-label={playback.queue.length ? "Play next queued track" : "Next track unavailable: queue is empty"}><Icon name="next" size={20} /></button>
+            <button className="wheel-action wheel-play" type="button" disabled={!playbackEnabled || !displayTrack} onClick={() => { console.info("MyPod playback: iPod play control tapped"); playbackController.toggle(displayTrack); }} aria-label={playback.phase === "playing" ? "Pause playback" : "Play playback"} title={playback.phase === "playing" ? "Pause" : "Play"}><Icon name={playback.phase === "playing" ? "pause" : "play"} size={20} /></button>
+            <button className="wheel-center" type="button" disabled={!displayTrack} onClick={onCenterSelect} aria-label="Select: find this track in your library">SELECT</button>
           </div>
         </div>
-        <p className="ipod-caption">Menu closes the player. Next plays the first queued track; previous restarts or returns to history.</p>
+        <p className="ipod-caption">Menu closes the player. Select finds this track in your library. Next plays the first queued track.</p>
       </section>
     </div>
   );
@@ -209,6 +286,7 @@ function App() {
   const [playerOpen, setPlayerOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [selectedTrack, setSelectedTrack] = useState<Track | null>(null);
+  const [activeAlbum, setActiveAlbum] = useState<Track | null>(null);
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const [spotifyPreview, setSpotifyPreview] = useState<SpotifyCsvPreview | null>(null);
@@ -388,6 +466,11 @@ function App() {
     }
   };
 
+  const playTrack = (track: Track) => {
+    console.info("MyPod playback: track-row play control tapped");
+    void playbackController.play(track);
+  };
+
   const artists = useMemo(() => [...new Set(tracks.map((track) => track.artist).filter((artist): artist is string => Boolean(artist)))].sort((a, b) => a.localeCompare(b)), [tracks]);
   const albums = useMemo(() => [...new Map(tracks.filter((track) => track.album).map((track) => [`${track.album}\u0000${track.artist || ""}`, track])).values()], [tracks]);
   const visibleTracks = useMemo(() => {
@@ -406,6 +489,16 @@ function App() {
     setQuery(term);
     setView("Search");
   };
+
+  const openAlbum = (track: Track) => {
+    setActiveAlbum(track);
+    setQuery("");
+    setView("Album");
+  };
+
+  const albumTracks = useMemo(() => activeAlbum?.album
+    ? tracks.filter((track) => track.album?.localeCompare(activeAlbum.album || "", undefined, { sensitivity: "accent" }) === 0 && (track.artist || "") === (activeAlbum.artist || ""))
+    : [], [activeAlbum, tracks]);
 
   const importAudio = async () => {
     setImporting(true);
@@ -601,7 +694,7 @@ function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <a className="brand" href="#home" onClick={(event) => { event.preventDefault(); navigate("Home"); }} aria-label="MyPod Home">
-          <span className="brand-mark"><span /><span /><span /></span><span>MyPod</span>
+          <img className="brand-logo" src={myPodLogo} alt="" /><span>MyPod</span>
         </a>
         <nav className="primary-nav" aria-label="Primary navigation">
           <button className={`nav-item ${view === "Home" ? "nav-active" : ""}`} aria-current={view === "Home" ? "page" : undefined} onClick={() => navigate("Home")}><Icon name="home" /><span>Home</span></button>
@@ -619,8 +712,8 @@ function App() {
             <button className={`sidebar-collection-item ${view === "Liked Songs" ? "sidebar-item-active" : ""}`} type="button" onClick={() => navigate("Liked Songs")}>
               <span className="sidebar-liked-art"><Icon name="heart" size={20} /></span><span className="sidebar-item-copy"><strong>Liked Songs</strong><small>Saved tracks unavailable</small></span>
             </button>
-            {albums.slice(0, 6).map((album) => <button className="sidebar-collection-item" key={`${album.album}-${album.artist}`} type="button" onClick={() => searchFor(album.album || "")}>
-              <Art label={album.album || album.title} size="small" /><span className="sidebar-item-copy"><strong>{album.album || "Unknown album"}</strong><small>Album · {album.artist || "Unknown artist"}</small></span>
+            {albums.slice(0, 6).map((album) => <button className="sidebar-collection-item" key={`${album.album}-${album.artist}`} type="button" onClick={() => openAlbum(album)}>
+              <Art label={album.album || album.title} size="small" trackId={album.id} /><span className="sidebar-item-copy"><strong>{album.album || "Unknown album"}</strong><small>Album · {album.artist || "Unknown artist"}</small></span>
             </button>)}
             {artists.slice(0, 4).map((artist) => <button className="sidebar-collection-item" key={`artist-${artist}`} type="button" onClick={() => searchFor(artist)}>
               <span className="sidebar-artist-art"><Icon name="artist" size={20} /></span><span className="sidebar-item-copy"><strong>{artist}</strong><small>Artist</small></span>
@@ -635,7 +728,7 @@ function App() {
       <main className="main-panel">
         <div className="main-scroll">
           <header className="topbar">
-            <span className="mobile-brand">MyPod</span>
+            <span className="mobile-brand"><img src={myPodLogo} alt="" />MyPod</span>
             <div className="topbar-start">
               <div className="history-controls"><button type="button" aria-label="Back" disabled><Icon name="arrow-left" /></button><button type="button" aria-label="Forward" disabled><Icon name="arrow-right" /></button></div>
               <button className="home-shortcut" type="button" onClick={() => navigate("Home")} aria-label="Home"><Icon name="home" size={21} /></button>
@@ -650,13 +743,22 @@ function App() {
           {view === "Search" && <div className="search-field mobile-search-field"><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tracks, artists, albums" aria-label="Search your library" autoFocus /></div>}
 
           <div className="page-content">
+            {view === "Album" && activeAlbum && <>
+              <section className="album-detail-heading" aria-labelledby="album-detail-title">
+                <button type="button" className="album-detail-back" onClick={() => { setLibraryFilter("Albums"); setView("Your Library"); }}>Your Library · Albums</button>
+                <Art label={activeAlbum.album || activeAlbum.title} size="large" trackId={activeAlbum.id} eager />
+                <div><p className="eyebrow">ALBUM</p><h1 id="album-detail-title">{activeAlbum.album || "Unknown album"}</h1><p>{activeAlbum.artist || "Unknown artist"} · {albumTracks.length}{tracks.length < total ? "+" : ""} tracks currently loaded</p></div>
+              </section>
+              <TrackSection title="Tracks" tracks={albumTracks} selectedTrackId={selectedTrack?.id} playback={playback} playbackEnabled={playbackEnabled} onSelectTrack={setSelectedTrack} onPlay={playTrack} onAddToQueue={(track) => playbackController.enqueue(track)} emptyCopy="No tracks from this album are loaded yet. Load more library tracks to find them." />
+              <LoadMore count={tracks.length} total={total} loading={loadingMore} onLoad={loadMore} />
+            </>}
             {view === "Home" && <>
               <header className="home-heading">
                 <div><p className="eyebrow">ON THIS DEVICE</p><h1>Your music</h1></div>
                 <button className="home-library-link" type="button" onClick={() => navigate("Your Library")}>Browse library <Icon name="arrow-right" size={16} /></button>
               </header>
               {albums.length > 0 && <section className="quick-row" aria-label="Album shortcuts">
-                {albums.slice(0, 4).map((album) => <button key={`${album.album}-${album.artist}`} onClick={() => searchFor(album.album || "")} aria-label={`Search tracks from ${album.album || "unknown album"}`}><Art label={album.album || album.title} size="small" /><span className="quick-label">{album.album || "Unknown album"}</span></button>)}
+                {albums.slice(0, 4).map((album) => <button key={`${album.album}-${album.artist}`} onClick={() => openAlbum(album)} aria-label={`Open album ${album.album || "unknown album"}`}><Art label={album.album || album.title} size="small" trackId={album.id} /><span className="quick-label">{album.album || "Unknown album"}</span></button>)}
               </section>}
               <ApiStatus loading={loading} error={error} retry={() => void loadLibrary()} />
               <section className="content-section">
@@ -674,13 +776,13 @@ function App() {
                   {artists.slice(0, 8).map((artist) => <CollectionCard key={artist} title={artist} subtitle="Artist from your library" shape="circle" icon="artist" />)}
                 </div>
               </section>}
-              {tracks.length > 0 && <TrackSection title="In your library" tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} playbackEnabled={playbackEnabled} onSelectTrack={setSelectedTrack} onPlay={(track) => void playbackController.play(track)} onAddToQueue={(track) => playbackController.enqueue(track)} />}
+              {tracks.length > 0 && <TrackSection title="In your library" tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} playbackEnabled={playbackEnabled} onSelectTrack={setSelectedTrack} onPlay={playTrack} onAddToQueue={(track) => playbackController.enqueue(track)} />}
             </>}
 
             {view === "Search" && <>
               <div className="page-heading"><p className="eyebrow">FIND SOMETHING FAMILIAR</p><h1>Search</h1><p>Search tracks, artists, and albums among tracks currently loaded from your library.</p></div>
               <ApiStatus loading={loading} error={error} retry={() => void loadLibrary()} />
-              {query.trim() ? <><TrackSection title={`Results in loaded tracks for “${query.trim()}”`} tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} playbackEnabled={playbackEnabled} onSelectTrack={setSelectedTrack} onPlay={(track) => void playbackController.play(track)} onAddToQueue={(track) => playbackController.enqueue(track)} emptyCopy="No matching tracks in the loaded part of your library." /><LoadMore count={tracks.length} total={total} loading={loadingMore} onLoad={loadMore} /></> : <EmptyState icon="search" title="Search your library" copy="Type a track, artist, or album name to find it on this device." />}
+              {query.trim() ? <><TrackSection title={`Results in loaded tracks for “${query.trim()}”`} tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} playbackEnabled={playbackEnabled} onSelectTrack={setSelectedTrack} onPlay={playTrack} onAddToQueue={(track) => playbackController.enqueue(track)} emptyCopy="No matching tracks in the loaded part of your library." /><LoadMore count={tracks.length} total={total} loading={loadingMore} onLoad={loadMore} /></> : <EmptyState icon="search" title="Search your library" copy="Type a track, artist, or album name to find it on this device." />}
             </>}
 
               {matchReview && <section className="spotify-preview" aria-label="Review audio match">
@@ -754,9 +856,9 @@ function App() {
               </section>}
               <div className="filter-pills" role="tablist" aria-label="Library filters">{["Tracks", "Artists", "Albums", "Playlists"].map((filter) => <button role="tab" aria-selected={libraryFilter === filter} className={libraryFilter === filter ? "pill-active" : ""} key={filter} onClick={() => setLibraryFilter(filter)}>{filter}</button>)}</div>
               <ApiStatus loading={loading} error={error} retry={() => void loadLibrary()} />
-              {libraryFilter === "Tracks" && <TrackSection title="Tracks" tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} playbackEnabled={playbackEnabled} onSelectTrack={setSelectedTrack} onPlay={(track) => void playbackController.play(track)} onAddToQueue={(track) => playbackController.enqueue(track)} emptyCopy={libraryAdapter.importAudio ? "Import an audio file from Files to add it to your library." : "Your scanned tracks will appear here."} />}
+              {libraryFilter === "Tracks" && <TrackSection title="Tracks" tracks={visibleTracks} selectedTrackId={selectedTrack?.id} playback={playback} playbackEnabled={playbackEnabled} onSelectTrack={setSelectedTrack} onPlay={playTrack} onAddToQueue={(track) => playbackController.enqueue(track)} emptyCopy={libraryAdapter.importAudio ? "Import an audio file from Files to add it to your library." : "Your scanned tracks will appear here."} />}
               {libraryFilter === "Artists" && <CollectionSection title="Artists" items={artists.map((artist) => ({ title: artist, subtitle: "Artist", shape: "circle" as const, icon: "artist" as IconName }))} emptyTitle="No artists yet" />}
-              {libraryFilter === "Albums" && <CollectionSection title="Albums" items={albums.map((album) => ({ title: album.album || "Unknown album", subtitle: album.artist || "Unknown artist", icon: "disc" as IconName }))} emptyTitle="No albums yet" />}
+              {libraryFilter === "Albums" && <CollectionSection title="Albums" items={albums.map((album) => ({ title: album.album || "Unknown album", subtitle: album.artist || "Unknown artist", icon: "disc" as IconName, artworkTrackId: album.id, onClick: () => openAlbum(album) }))} emptyTitle="No albums yet" />}
               {libraryFilter === "Playlists" && (playlistAdapter ? <section className="playlist-manager" aria-label="Playlists">
                 {playlistError && <p className="playlist-error" role="alert">{playlistError}</p>}
                 {activePlaylistId === null ? <>
@@ -764,7 +866,7 @@ function App() {
                   {playlists.length ? <><p className="visually-hidden" id="playlist-gallery-help">Swipe or scroll horizontally to browse. Use the left and right arrow keys to move between playlists.</p><div className="playlist-gallery" role="list" aria-label="Your playlists" aria-describedby="playlist-gallery-help" tabIndex={0} onKeyDown={handlePlaylistGalleryKeyDown}>{[...playlists].sort((a, b) => Number(Boolean(a.source_playlist_identifier)) - Number(Boolean(b.source_playlist_identifier))).map((playlist) => <div className="playlist-card-item" role="listitem" key={playlist.id}><button className="playlist-card" type="button" data-playlist-card onClick={() => void selectPlaylist(playlist.id)} aria-label={`Open ${playlist.name}, ${playlist.track_count} ${playlist.track_count === 1 ? "track" : "tracks"}`}><PlaylistCover /><strong>{playlist.name}</strong><small>{playlist.source_playlist_identifier?.startsWith("spotify-import:") ? "Imported Spotify · " : "My playlist · "}{playlist.track_count} {playlist.track_count === 1 ? "track" : "tracks"}</small></button></div>)}</div></> : <EmptyState icon="library" title="No playlists yet" copy="Create a playlist, then add tracks from this on-device library." />}
                 </> : <>
                   <div className="playlist-detail-heading"><button type="button" className="playlist-back" onClick={() => setActivePlaylistId(null)}>All playlists</button><div className="playlist-heading-copy"><p className="eyebrow">ON THIS DEVICE</p><h2>{playlists.find((playlist) => playlist.id === activePlaylistId)?.name || "Playlist"}</h2><p>{playlistEntries.length} {playlistEntries.length === 1 ? "entry" : "entries"} · {playlists.find((p) => p.id === activePlaylistId)?.source_playlist_identifier?.startsWith("spotify-import:") ? "provisional source order; edits saved locally" : "display order saved on this device"}</p></div><div className="playlist-detail-actions"><button type="button" onClick={() => { setPlaylistName(playlists.find((playlist) => playlist.id === activePlaylistId)?.name || ""); setPlaylistDialog("rename"); }}>Rename</button><button type="button" onClick={() => setPlaylistDialog("delete")}>Delete</button><button type="button" onClick={() => setPlaylistDialog("add")} disabled={tracks.length === 0}>Add tracks</button></div></div>
-                  {playlistEntries.length ? <ol className="playlist-entry-list">{playlistEntries.map((entry, index) => <li key={entry.id} className="playlist-entry-row"><span className="playlist-entry-position">{index + 1}</span><Art label={entry.album || entry.title} size="small" /><div className="playlist-entry-copy"><strong>{entry.title}</strong><span>{entry.artist || (entry.track_id === null ? "Unmatched source track · kept for review" : "Unknown artist")}{entry.album ? ` · ${entry.album}` : ""}{entry.catalog_id ? (entry.track_id === null ? " · Missing audio" : " · Audio linked") : ""}</span>{entry.catalog_id && libraryAdapter.setAudioMatch && <button type="button" disabled={matchBusy} onClick={() => void reviewMatch(entry.catalog_id!)}>Review audio</button>}</div>{entry.track_id !== null ? <button type="button" className="playlist-entry-play" onClick={() => void playPlaylistEntry(entry)} disabled={!playbackEnabled} aria-label={`Play ${entry.title}`}><Icon name="play" size={16} /></button> : <span className="playlist-unmatched">Missing audio</span>}<div className="playlist-order-controls"><button type="button" onClick={() => void movePlaylistEntry(index, -1)} disabled={index === 0 || playlistBusy} aria-label={`Move ${entry.title} up`}>↑</button><button type="button" onClick={() => void movePlaylistEntry(index, 1)} disabled={index === playlistEntries.length - 1 || playlistBusy} aria-label={`Move ${entry.title} down`}>↓</button></div><button type="button" className="playlist-entry-remove" onClick={() => void removePlaylistEntry(entry.id)} aria-label={`Remove ${entry.title} from playlist`}><Icon name="close" size={16} /></button></li>)}</ol> : <EmptyState icon="music" title="This playlist is empty" copy="Add one or more tracks from your on-device library. Repeated entries are allowed." />}
+                  {playlistEntries.length ? <ol className="playlist-entry-list">{playlistEntries.map((entry, index) => <li key={entry.id} className="playlist-entry-row"><span className="playlist-entry-position">{index + 1}</span><Art label={entry.album || entry.title} size="small" trackId={entry.track_id} /><div className="playlist-entry-copy"><strong>{entry.title}</strong><span>{entry.artist || (entry.track_id === null ? "Unmatched source track · kept for review" : "Unknown artist")}{entry.album ? ` · ${entry.album}` : ""}{entry.catalog_id ? (entry.track_id === null ? " · Missing audio" : " · Audio linked") : ""}</span>{entry.catalog_id && libraryAdapter.setAudioMatch && <button type="button" disabled={matchBusy} onClick={() => void reviewMatch(entry.catalog_id!)}>Review audio</button>}</div>{entry.track_id !== null ? <button type="button" className="playlist-entry-play" onClick={() => void playPlaylistEntry(entry)} disabled={!playbackEnabled} aria-label={`Play ${entry.title}`}><Icon name="play" size={16} /></button> : <span className="playlist-unmatched">Missing audio</span>}<div className="playlist-order-controls"><button type="button" onClick={() => void movePlaylistEntry(index, -1)} disabled={index === 0 || playlistBusy} aria-label={`Move ${entry.title} up`}>↑</button><button type="button" onClick={() => void movePlaylistEntry(index, 1)} disabled={index === playlistEntries.length - 1 || playlistBusy} aria-label={`Move ${entry.title} down`}>↓</button></div><button type="button" className="playlist-entry-remove" onClick={() => void removePlaylistEntry(entry.id)} aria-label={`Remove ${entry.title} from playlist`}><Icon name="close" size={16} /></button></li>)}</ol> : <EmptyState icon="music" title="This playlist is empty" copy="Add one or more tracks from your on-device library. Repeated entries are allowed." />}
                 </>}
               </section> : <EmptyState icon="library" title="Playlist support is not available here" copy="Playlists are currently stored in the iPhone's on-device catalog." />)}
               <LoadMore count={tracks.length} total={total} loading={loadingMore} onLoad={loadMore} />
@@ -778,8 +880,8 @@ function App() {
         </div>
 
         <footer className="playback-bar">
-          <div className="now-track"><div className="mini-art"><Icon name="music" size={17} /></div><div className="now-copy"><strong>{playback.track?.title || selectedTrack?.title || "Nothing selected"}</strong><span>{playback.track ? playback.error || playback.phase : selectedTrack ? `${selectedTrack.artist || "Unknown artist"} · selected, not playing` : "Choose a track to begin"}</span></div><button className="heart-quiet" type="button" aria-label="Favorites unavailable" disabled><Icon name="heart" size={17} /></button></div>
-          <div className="transport"><div className="transport-buttons"><button disabled aria-label="Shuffle unavailable" title="Shuffle is not implemented"><Icon name="shuffle" size={17} /></button><button disabled={!playbackEnabled || !playback.track} onClick={() => void playbackController.previous()} aria-label="Previous track" title="Restart current track after 3 seconds, otherwise return to history"><Icon name="previous" size={19} /></button><button className="play-main" disabled={!playbackEnabled || (!playback.track && !selectedTrack)} onClick={() => playbackController.toggle(selectedTrack)} aria-label={playbackEnabled ? (playback.phase === "playing" ? "Pause" : playback.phase === "loading" ? "Cancel loading" : "Play") : "Playback unavailable on iPhone yet"} title={playback.error || undefined}><Icon name={playback.phase === "playing" ? "pause" : "play"} size={17} /></button><button disabled={!playbackEnabled || playback.queue.length === 0} onClick={() => void playbackController.next()} aria-label={playback.queue.length ? "Play next queued track" : "Next track unavailable: queue is empty"} title="Play the first queued track"><Icon name="next" size={19} /></button><button disabled aria-label="Repeat unavailable" title="Repeat is not implemented"><Icon name="repeat" size={17} /></button></div><div className="seek-row"><span>{formatDuration(playback.currentTime)}</span><input type="range" min="0" max={playback.duration || 1} value={Math.min(playback.currentTime, playback.duration || 0)} disabled={!playbackEnabled || !playback.track || !playback.duration || playback.phase === "error"} onChange={(event) => playbackController.seek(Number(event.target.value))} aria-label="Playback position" /><span>{formatDuration(playback.duration)}</span></div></div>
+          <div className="now-track"><button className="now-track-open" type="button" disabled={!playback.track && !selectedTrack} onClick={() => setPlayerOpen(true)} aria-label="Open iPod Now Playing player"><span className="mini-art"><Art label={(playback.track || selectedTrack)?.album || (playback.track || selectedTrack)?.title || "MyPod"} size="small" trackId={(playback.track || selectedTrack)?.id} eager /></span><span className="now-copy"><strong>{playback.track?.title || selectedTrack?.title || "Nothing selected"}</strong><span role={playback.error ? "alert" : "status"} aria-live="polite">{playback.track ? playback.error || playback.phase : selectedTrack ? `${selectedTrack.artist || "Unknown artist"} · selected, not playing` : "Choose a track to begin"}</span></span></button><button className="heart-quiet" type="button" aria-label="Favorites unavailable" disabled><Icon name="heart" size={17} /></button></div>
+          <div className="transport"><div className="transport-buttons"><button disabled aria-label="Shuffle unavailable" title="Shuffle is not implemented"><Icon name="shuffle" size={17} /></button><button disabled={!playbackEnabled || !playback.track} onClick={() => void playbackController.previous()} aria-label="Previous track" title="Restart current track after 3 seconds, otherwise return to history"><Icon name="previous" size={19} /></button><button className="play-main" disabled={!playbackEnabled || (!playback.track && !selectedTrack)} onClick={() => { console.info("MyPod playback: bottom-bar play control tapped"); playbackController.toggle(selectedTrack); }} aria-label={playbackEnabled ? (playback.phase === "playing" ? "Pause" : playback.phase === "loading" ? "Cancel loading" : "Play") : "Playback unavailable on iPhone yet"} title={playback.error || undefined}><Icon name={playback.phase === "playing" ? "pause" : "play"} size={17} /></button><button disabled={!playbackEnabled || playback.queue.length === 0} onClick={() => void playbackController.next()} aria-label={playback.queue.length ? "Play next queued track" : "Next track unavailable: queue is empty"} title="Play the first queued track"><Icon name="next" size={19} /></button><button disabled aria-label="Repeat unavailable" title="Repeat is not implemented"><Icon name="repeat" size={17} /></button></div><PlaybackSeekBar className="seek-row" playback={playback} playbackEnabled={playbackEnabled} label="Playback position" onSeek={(seconds) => playbackController.seek(seconds)} /></div>
           <div className="playback-tools"><button className="queue-toggle" type="button" aria-label={`Open queue, ${playback.queue.length} upcoming`} aria-expanded={queueOpen} onClick={() => setQueueOpen((open) => !open)}><Icon name="queue" size={17} /><span>{playback.queue.length}</span></button><button className="open-player" onClick={() => setPlayerOpen(true)} type="button"><span className="device-glyph">◉</span><span>Now Playing</span></button><Icon name="volume" size={18} /><input type="range" min="0" max="100" value="0" readOnly disabled aria-label="Volume unavailable" /></div>
         </footer>
       </main>
@@ -799,7 +901,14 @@ function App() {
           <footer><button type="button" onClick={() => setPlaylistDialog(null)}>Cancel</button><button type="submit" disabled={playlistBusy}>{playlistBusy ? "Saving…" : playlistDialog === "delete" ? "Delete playlist" : "Save"}</button></footer>
         </form>}
       </section></div>}
-      {playerOpen && <IpodPlayer onClose={() => setPlayerOpen(false)} selectedTrack={selectedTrack} playback={playback} playbackEnabled={playbackEnabled} />}
+      {playerOpen && <IpodPlayer onClose={() => setPlayerOpen(false)} onCenterSelect={() => {
+        const track = playback.track || selectedTrack;
+        if (!track) return;
+        setSelectedTrack(track);
+        setQuery(track.title);
+        setView("Search");
+        setPlayerOpen(false);
+      }} selectedTrack={selectedTrack} playback={playback} playbackEnabled={playbackEnabled} />}
     </div>
   );
 }
@@ -818,7 +927,7 @@ function TrackSection({ title, tracks, selectedTrackId, playback, playbackEnable
   return <section className="content-section track-section"><SectionTitle title={title} />{tracks.length ? <div className="track-list" role="list"><div className="track-header"><span>#</span><span>Track</span><span>Album</span><span>Time</span><span aria-hidden="true" /><span aria-hidden="true" /></div>{tracks.map((track, index) => <TrackRow key={track.id} track={track} index={index} selected={track.id === selectedTrackId} playback={playback} playbackEnabled={playbackEnabled} onSelect={onSelectTrack} onPlay={onPlay} onAddToQueue={onAddToQueue} />)}</div> : <EmptyState icon="music" title="No tracks to show" copy={emptyCopy} />}</section>;
 }
 
-function CollectionSection({ title, items, emptyTitle }: { title: string; items: { title: string; subtitle: string; shape?: "square" | "circle"; icon: IconName }[]; emptyTitle: string }) {
+function CollectionSection({ title, items, emptyTitle }: { title: string; items: { title: string; subtitle: string; shape?: "square" | "circle"; icon: IconName; artworkTrackId?: number; onClick?: () => void }[]; emptyTitle: string }) {
   return <section className="content-section"><SectionTitle title={title} />{items.length ? <div className="collection-grid">{items.map((item) => <CollectionCard key={item.title} {...item} />)}</div> : <EmptyState icon={title === "Artists" ? "artist" : "disc"} title={emptyTitle} copy="A local scan will add real library metadata here." />}</section>;
 }
 
