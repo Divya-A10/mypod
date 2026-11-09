@@ -2,6 +2,8 @@
 
 myPod (LocalPod) is a local-first music player and personal recommendation system. The backend indexes local audio into SQLite. A responsive React interface and Tauri desktop shell are in place as an initial UI pass. Desktop playback APIs and managed iOS imports, native playback, playlists, Spotify metadata import, and conservative audio matching are implemented. Some recommendation and artwork features remain future work.
 
+<img width="7162" height="9662" alt="diagram" src="https://github.com/user-attachments/assets/24742636-7c38-44b5-b810-2a683f361643" />
+
 ## Backend setup
 
 The backend uses FastAPI for HTTP endpoints, Uvicorn to serve the app, and Mutagen to read local audio metadata. SQLite is included with Python. A virtual environment (`.venv`) keeps this project's Python packages separate from your system Python and other projects. The development extras add pytest and HTTPX for isolated in-process API tests.
