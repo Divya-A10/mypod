@@ -27,6 +27,10 @@ targets:
   mypod-desktop_iOS:
     type: application
     platform: iOS
+    attributes:
+      SystemCapabilities:
+        com.apple.BackgroundModes:
+          enabled: 1
     sources:
       - path: Sources
       - path: Assets.xcassets
@@ -48,6 +52,7 @@ targets:
       properties:
         LSRequiresIPhoneOS: true
         UILaunchStoryboardName: LaunchScreen
+        UIBackgroundModes: [audio]
         UIRequiredDeviceCapabilities: [arm64, metal]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -59,7 +64,7 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         CFBundleShortVersionString: 0.1.0
-        CFBundleVersion: "0.1.0"
+        CFBundleVersion: "0.1.1"
     entitlements:
       path: mypod-desktop_iOS/mypod-desktop_iOS.entitlements
     scheme:
@@ -77,6 +82,9 @@ targets:
         EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
       groups: [app]
     dependencies:
+      - sdk: AVFoundation.framework
+      - sdk: AVFAudio.framework
+      - sdk: MediaPlayer.framework
       - framework: libapp.a
         embed: false
       - sdk: CoreGraphics.framework

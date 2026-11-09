@@ -501,7 +501,6 @@ body, .app-shell { background: var(--bg); }
 .desktop-search:focus-within { border-color: #777; background: #2b2b2b; }
 .desktop-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: #fff; font-size: 14px; }
 .desktop-search input::placeholder { color: #c0c0c0; }
-.mobile-search-shortcut { display: none; }
 .topbar-right { gap: 18px; }
 .profile-button { width: 36px; height: 36px; border: 3px solid #292929; background: #444; color: #fff; }
 .page-content { width: 100%; max-width: none; padding: 15px 30px 52px; }
@@ -527,7 +526,7 @@ body, .app-shell { background: var(--bg); }
 .track-row { min-height: 60px; }
 .track-row:hover { background: #ffffff12; }
 .playback-bar { min-height: 86px; border-top: 1px solid #ffffff15; background: #080808; }
-.track-title-select, .desktop-search input, .home-shortcut, .mobile-search-shortcut, .sidebar-library-filters button, .sidebar-list-tools button, .sidebar-collection-item { -webkit-tap-highlight-color: transparent; }
+.track-title-select, .desktop-search input, .home-shortcut, .sidebar-library-filters button, .sidebar-list-tools button, .sidebar-collection-item { -webkit-tap-highlight-color: transparent; }
 
 @media (max-width: 1080px) and (min-width: 761px) {
   .app-shell { grid-template-columns: 238px minmax(0,1fr); }
@@ -547,8 +546,7 @@ body, .app-shell { background: var(--bg); }
   .topbar { height: 62px; padding: 0 15px; }
   .mobile-brand { display: block; }
   .topbar-start { display: none; }
-  .topbar-right { margin-left: auto; }
-  .mobile-search-shortcut { display: grid; width: 44px; height: 44px; place-items: center; border: 0; border-radius: 50%; background: #242424; color: #fff; }
+  .topbar-right { display: none; }
   .local-badge, .profile-button { display: none; }
   .page-content { padding: 12px 15px 52px; }
   .home-feature-panel { margin-right: -15px; margin-left: -15px; padding: 14px 15px 16px; border-radius: 0 0 12px 12px; }
@@ -786,4 +784,140 @@ body, .app-shell { background: var(--bg); }
   .album-detail-heading > .artwork-large { width: 116px; height: 116px; }
   .album-detail-heading h1 { font-size: 27px; }
   .album-detail-heading p:last-child { font-size: 11px; }
+}
+
+/* Final, scoped wheel geometry wins over legacy desktop and mobile rules. */
+.ipod-stage .click-wheel > .wheel-action,
+.ipod-stage .click-wheel > .wheel-menu,
+.ipod-stage .click-wheel > .wheel-center {
+  position: absolute;
+  display: grid;
+  flex-direction: initial;
+  place-items: center;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  transition: color .12s ease, background-color .12s ease, box-shadow .12s ease;
+}
+.ipod-stage .click-wheel > .wheel-action {
+  z-index: 3;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  color: #555b5d;
+}
+.ipod-stage .click-wheel > .wheel-action > svg { display: block; width: 20px; height: 20px; flex: none; }
+.ipod-stage .click-wheel > .wheel-prev { top: calc(50% - 24px); right: auto; bottom: auto; left: 5%; margin: 0; transform: none; }
+.ipod-stage .click-wheel > .wheel-next { top: calc(50% - 24px); right: 5%; bottom: auto; left: auto; margin: 0; transform: none; }
+.ipod-stage .click-wheel > .wheel-play { top: auto; right: auto; bottom: 5%; left: calc(50% - 24px); margin: 0; transform: none; }
+.ipod-stage .click-wheel > .wheel-menu { z-index: 3; top: 5%; right: auto; bottom: auto; left: 50%; width: 76px; height: 44px; margin: 0; transform: translateX(-50%); border-radius: 22px; color: #555b5d; }
+.ipod-stage .click-wheel > .wheel-center { z-index: 2; top: 50%; left: 50%; width: 88px; height: 88px; transform: translate(-50%, -50%); }
+.ipod-stage .click-wheel > .wheel-action:not(:disabled):hover,
+.ipod-stage .click-wheel > .wheel-action:not(:disabled):active,
+.ipod-stage .click-wheel > .wheel-menu:hover,
+.ipod-stage .click-wheel > .wheel-menu:active {
+  color: #303638;
+  background-color: #555b5d12;
+  transform: none;
+}
+.ipod-stage .click-wheel > .wheel-menu:hover,
+.ipod-stage .click-wheel > .wheel-menu:active { transform: translateX(-50%); }
+.ipod-stage .click-wheel > .wheel-center:hover,
+.ipod-stage .click-wheel > .wheel-center:active { transform: translate(-50%, -50%); }
+.ipod-stage .click-wheel > .wheel-action:disabled { color: #777d7e; opacity: .8; }
+
+@media (max-width: 390px) {
+  .ipod-stage .click-wheel > .wheel-action { width: 44px; height: 44px; }
+  .ipod-stage .click-wheel > .wheel-action > svg { width: 18px; height: 18px; }
+  .ipod-stage .click-wheel > .wheel-prev { top: calc(50% - 22px); left: 4%; }
+  .ipod-stage .click-wheel > .wheel-next { top: calc(50% - 22px); right: 4%; }
+  .ipod-stage .click-wheel > .wheel-play { left: calc(50% - 22px); }
+  .ipod-stage .click-wheel > .wheel-center { width: 78px; height: 78px; }
+}
+
+/* Stable WebKit viewport, scrolling, and touch states on iPhone. */
+@media (max-width: 760px) {
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  body { overflow-x: hidden; }
+  #root { width: 100%; height: 100%; min-height: 0; overflow: hidden; }
+  .app-shell {
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+    padding-top: env(safe-area-inset-top);
+  }
+  .main-panel { height: 100%; min-height: 0; }
+  .main-scroll {
+    height: 100%;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+    scroll-padding-block: 12px calc(150px + env(safe-area-inset-bottom));
+    padding-bottom: calc(142px + env(safe-area-inset-bottom));
+  }
+  .topbar { flex: 0 0 62px; justify-content: flex-start; }
+  .mobile-brand { display: inline-flex; min-height: 44px; }
+  .topbar-right { display: none; }
+  .mobile-search-field input,
+  .main-panel input:not([type="range"]):not([type="file"]):not([type="checkbox"]):not([type="radio"]),
+  .main-panel textarea,
+  .main-panel select {
+    min-height: 44px;
+    font-size: 16px !important;
+    scroll-margin-block: 12px calc(150px + env(safe-area-inset-bottom));
+  }
+  .mobile-search-field { width: auto; min-height: 52px; margin: 12px 15px 4px; }
+  .search-field input { min-height: 44px; font-size: 16px; }
+  button:hover, button:active { transform: none !important; }
+  button { transition-property: background-color, border-color, color, opacity, box-shadow !important; }
+  .wheel-prev, .wheel-next { transform: none; }
+  .ipod-stage { animation: none; }
+}
+
+/* The first-gen SE has little vertical room once both safe areas are reserved.
+   Keep the modal scrollable, but compact the device so its bottom wheel control
+   is visible without having to scroll on the common 667px-tall viewport. */
+@media (max-width: 760px) and (max-height: 720px) {
+  .player-scrim {
+    display: grid;
+    align-content: start;
+    justify-items: center;
+    height: 100vh;
+    height: 100dvh;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: max(8px, env(safe-area-inset-top)) 12px max(8px, env(safe-area-inset-bottom));
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .ipod-stage { min-height: 0; padding: 48px 0 6px; }
+  .ipod-body { width: min(344px, calc(100vw - 28px)); padding: 12px 16px 14px; border-radius: 28px; }
+  .ipod-body::before { inset: 5px; border-radius: 23px; }
+  .ipod-header { min-height: 22px; padding-bottom: 8px; }
+  .ipod-screen { min-height: 128px; gap: 7px; padding: 6px; border-width: 5px; }
+  .ipod-screen-art { width: 62px; height: 62px; }
+  .ipod-screen-meta strong { font-size: 11px; }
+  .ipod-screen-meta > span { font-size: 8px; }
+  .ipod-screen-meta .ipod-playback-state { margin-top: 2px; }
+  .ipod-progress { min-height: 30px; margin-top: 3px; }
+  .ipod-progress input { min-height: 30px; }
+  .click-wheel { width: min(218px, 62vw); height: min(218px, 62vw); margin-top: 14px; }
+  .ipod-caption { max-width: min(344px, calc(100vw - 32px)); margin-top: 8px; font-size: 10px; }
+  .player-close { position: fixed; top: max(8px, env(safe-area-inset-top)); right: 12px; }
+}
+
+@media (max-width: 760px) and (max-height: 600px) {
+  .ipod-stage { padding-top: 48px; }
+  .ipod-body { padding: 9px 13px 11px; }
+  .ipod-screen { min-height: 112px; }
+  .ipod-screen-art { width: 54px; height: 54px; }
+  .click-wheel { width: min(194px, 58vw); height: min(194px, 58vw); margin-top: 10px; }
+  .ipod-stage .click-wheel > .wheel-center { width: 70px; height: 70px; }
+  .ipod-stage .click-wheel > .wheel-action { width: 42px; height: 42px; }
+  .ipod-stage .click-wheel > .wheel-prev { top: calc(50% - 21px); }
+  .ipod-stage .click-wheel > .wheel-next { top: calc(50% - 21px); }
+  .ipod-stage .click-wheel > .wheel-play { left: calc(50% - 21px); }
 }

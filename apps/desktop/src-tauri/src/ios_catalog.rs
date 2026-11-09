@@ -348,7 +348,7 @@ pub(crate) fn list_tracks_at(app_local_data: &Path, offset: usize) -> Result<Tra
     })
 }
 
-fn get_track_at(app_local_data: &Path, track_id: i64) -> Result<CatalogTrack, String> {
+pub(crate) fn get_track_at(app_local_data: &Path, track_id: i64) -> Result<CatalogTrack, String> {
     if track_id <= 0 {
         return Err("A valid library track ID is required".to_string());
     }
@@ -369,7 +369,7 @@ fn get_track_at(app_local_data: &Path, track_id: i64) -> Result<CatalogTrack, St
     Ok(track)
 }
 
-fn artwork_for_track_at(app_local_data: &Path, track_id: i64) -> Result<Option<ArtworkPayload>, String> {
+pub(crate) fn artwork_for_track_at(app_local_data: &Path, track_id: i64) -> Result<Option<ArtworkPayload>, String> {
     if track_id <= 0 {
         return Err("A valid library track ID is required".to_string());
     }

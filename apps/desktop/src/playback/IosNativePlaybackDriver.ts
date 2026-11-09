@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { PlaybackDriver, PlaybackDriverEvent, PlaybackDriverEventType } from "./PlaybackController";
+import type { Track } from "../library/contracts";
 
 type NativePlaybackSnapshot = {
   track_id: number | null;
@@ -18,11 +20,14 @@ type NativePlaybackSnapshot = {
 
 type Dependencies = {
   invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+  listen?: <T>(event: string, handler: (event: { payload: T }) => void) => Promise<UnlistenFn>;
   setInterval: typeof globalThis.setInterval;
   clearInterval: typeof globalThis.clearInterval;
 };
 
-const defaults: Dependencies = { invoke, setInterval, clearInterval };
+const defaults: Dependencies = { invoke, listen, setInterval, clearInterval };
+
+type NativePlaybackProgress = { track_id: number; current_time: number; duration: number | null };
 
 /** iOS playback talks only to native commands, which resolve library IDs privately. */
 export class IosNativePlaybackDriver implements PlaybackDriver {
@@ -33,8 +38,18 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   private lastDiagnosticState: string | null = null;
+  private readonly listenerReady: Promise<UnlistenFn | null>;
+  private adoptingTrack: number | null = null;
 
-  constructor(private readonly dependencies: Dependencies = defaults) {}
+  constructor(private readonly dependencies: Dependencies = defaults) {
+    this.listenerReady = dependencies.listen
+      ? dependencies.listen<NativePlaybackProgress>("local-playback-progress", (event) => this.onNativeProgress(event.payload))
+        .catch(() => {
+          console.warn("MyPod iOS playback: native progress event subscription unavailable; using AVPlayer state snapshots");
+          return null;
+        })
+      : Promise.resolve(null);
+  }
 
   get paused(): boolean { return !this.snapshot?.playing; }
   get currentTime(): number { return this.snapshot?.current_time ?? 0; }
@@ -54,6 +69,7 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
     }
     console.debug("MyPod iOS playback: dispatching native play command");
     try {
+      await this.listenerReady;
       await this.dependencies.invoke<void>("play_local_track", {
         trackId: this.trackId,
         reload: this.reloadRequested,
@@ -92,9 +108,16 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
     return () => this.listeners.delete(listener);
   }
 
+  setQueue(trackIds: number[]): void {
+    void this.dependencies.invoke<void>("set_local_playback_queue", { trackIds })
+      .catch(() => console.warn("MyPod iOS playback: native queue mirror could not be updated"));
+  }
+
   private startPolling(): void {
     if (this.timer !== null) return;
-    this.timer = this.dependencies.setInterval(() => { void this.poll(); }, 250);
+    // Poll only actual AVPlayer state transitions as a fallback. The visible
+    // progress line is driven by AVPlayer's native periodic time observer.
+    this.timer = this.dependencies.setInterval(() => { void this.poll(); }, 1000);
     void this.poll();
   }
 
@@ -110,7 +133,9 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
     try {
       const next = await this.dependencies.invoke<NativePlaybackSnapshot>("local_playback_state");
       if (next.track_id !== this.trackId) {
-        console.warn("MyPod iOS playback: native state track did not match the requested track");
+        if (Number.isSafeInteger(next.track_id) && (next.track_id ?? 0) > 0) {
+          await this.adoptNativeTrack(next);
+        }
         return;
       }
       const previous = this.snapshot;
@@ -160,6 +185,56 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
     }
   }
 
+  private onNativeProgress(event: NativePlaybackProgress): void {
+    if (!Number.isSafeInteger(event.track_id) || event.track_id < 1) return;
+    if (event.track_id !== this.trackId) {
+      void this.dependencies.invoke<NativePlaybackSnapshot>("local_playback_state")
+        .then((state) => this.adoptNativeTrack(state))
+        .catch(() => this.fail("Native playback state is unavailable."));
+      return;
+    }
+    const previous = this.snapshot;
+    const duration = Number.isFinite(event.duration) && (event.duration ?? 0) > 0 ? event.duration : null;
+    this.snapshot = {
+      ...(previous ?? nativeEmptySnapshot(this.trackId)),
+      track_id: this.trackId,
+      current_time: Number.isFinite(event.current_time) ? Math.max(0, event.current_time) : 0,
+      duration,
+    };
+    if (duration !== previous?.duration) this.emit("metadata");
+    if (this.snapshot.current_time !== previous?.current_time) this.emit("timeupdate");
+  }
+
+  private async adoptNativeTrack(snapshot: NativePlaybackSnapshot): Promise<void> {
+    const trackId = snapshot.track_id;
+    if (!Number.isSafeInteger(trackId) || (trackId ?? 0) < 1 || this.adoptingTrack === trackId) return;
+    this.adoptingTrack = trackId;
+    try {
+      const track = await this.dependencies.invoke<Track>("get_track", { trackId });
+      if (snapshot.track_id !== trackId) return;
+      this.trackId = trackId;
+      this.snapshot = snapshot;
+      this.reloadRequested = false;
+      const event: PlaybackDriverEvent = {
+        type: "externaltrack",
+        track,
+        currentTime: Number.isFinite(snapshot.current_time) ? snapshot.current_time : 0,
+        duration: typeof snapshot.duration === "number" && Number.isFinite(snapshot.duration) && snapshot.duration > 0
+          ? snapshot.duration
+          : Number.NaN,
+        paused: !snapshot.playing,
+        unsupported: false,
+      };
+      for (const listener of this.listeners) listener(event);
+      this.emit("metadata");
+      this.emit("timeupdate");
+    } catch {
+      console.warn("MyPod iOS playback: native track changed but library metadata could not be refreshed");
+    } finally {
+      this.adoptingTrack = null;
+    }
+  }
+
   private fail(message: string): void {
     if (this.snapshot?.error) return;
     this.snapshot = {
@@ -188,4 +263,8 @@ export class IosNativePlaybackDriver implements PlaybackDriver {
     };
     for (const listener of this.listeners) listener(event);
   }
+}
+
+function nativeEmptySnapshot(trackId: number | null): NativePlaybackSnapshot {
+  return { track_id: trackId, current_time: 0, duration: null, playing: false, loading: true, ended: false, error: null };
 }

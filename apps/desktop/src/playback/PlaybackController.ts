@@ -8,7 +8,8 @@ export type PlaybackDriverEventType =
   | "waiting"
   | "pause"
   | "ended"
-  | "error";
+  | "error"
+  | "externaltrack";
 
 export type PlaybackDriverEvent = {
   type: PlaybackDriverEventType;
@@ -18,6 +19,8 @@ export type PlaybackDriverEvent = {
   unsupported: boolean;
   /** Safe, user-facing error detail supplied by the platform driver. */
   message?: string;
+  /** Present when native lock-screen controls changed the active library track. */
+  track?: Track;
 };
 
 /** Platform media operations consumed by the shared playback controller. */
@@ -30,6 +33,8 @@ export interface PlaybackDriver {
   pause(): void;
   seek(seconds: number): void;
   subscribe(listener: (event: PlaybackDriverEvent) => void): () => void;
+  /** Optional native queue mirror for OS-level transport controls. */
+  setQueue?(trackIds: number[]): void;
 }
 
 export type PlaybackPhase = "idle" | "loading" | "playing" | "paused" | "ended" | "error";
@@ -284,6 +289,7 @@ export class PlaybackController {
   }
 
   private syncQueue(): void {
+    this.driver.setQueue?.(this.queueModel.getUpcoming().map((entry) => entry.trackId));
     this.update({ queue: this.queueModel.getUpcoming(), history: this.queueModel.getHistory() });
   }
 
@@ -306,6 +312,7 @@ export class PlaybackController {
       case "pause": this.onPause(); break;
       case "ended": this.onEnded(event); break;
       case "error": this.onError(event); break;
+      case "externaltrack": this.onExternalTrack(event); break;
     }
   };
 
@@ -338,6 +345,7 @@ export class PlaybackController {
 
     this.startedTrack = intent.track;
     this.startIntent = null;
+    this.driver.setQueue?.(this.queueModel.getUpcoming().map((entry) => entry.trackId));
     this.snapshot = {
       ...this.snapshot,
       phase: "playing",
@@ -373,6 +381,30 @@ export class PlaybackController {
       error: event.message || (event.unsupported
         ? "This audio format is not supported by the current player."
         : "This track could not be loaded. The file may be missing or its format unsupported."),
+    });
+  };
+
+  private onExternalTrack = (event: PlaybackDriverEvent): void => {
+    const track = event.track;
+    if (!track) return;
+    const previous = this.startedTrack;
+    if (event.paused === false && this.queueModel.peekNext()?.trackId === track.id) {
+      const entry = this.queueModel.peekNext();
+      if (entry) this.queueModel.recordQueueStart(entry.entryId, previous);
+    } else if (previous?.id !== track.id) {
+      this.queueModel.recordDirectStart(previous);
+    }
+    this.startedTrack = track;
+    this.startIntent = null;
+    this.driver.setQueue?.(this.queueModel.getUpcoming().map((entry) => entry.trackId));
+    this.update({
+      track,
+      phase: event.paused ? "paused" : "playing",
+      currentTime: Number.isFinite(event.currentTime) ? event.currentTime : 0,
+      duration: Number.isFinite(event.duration) && event.duration > 0 ? event.duration : null,
+      error: null,
+      queue: this.queueModel.getUpcoming(),
+      history: this.queueModel.getHistory(),
     });
   };
 }

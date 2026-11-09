@@ -20,6 +20,9 @@
 		DF511B98680DAF7D3DF51BE5 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B589B22C2840144EC78B91A /* Metal.framework */; };
 		E7EBC70B833929E4D92BBBA5 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F7D55881E2CD4316284B93BF /* Security.framework */; };
 		E9740EDC92AE4FBA5765DC68 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 96FAFD0FD4ABC794290E6E70 /* MetalKit.framework */; };
+		A1AA11111111111111111101 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2AA11111111111111111101 /* AVFoundation.framework */; };
+		A1AA11111111111111111102 /* AVFAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2AA11111111111111111102 /* AVFAudio.framework */; };
+		A1AA11111111111111111103 /* MediaPlayer.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2AA11111111111111111103 /* MediaPlayer.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -41,6 +44,9 @@
 		EE1A29ACA84F8D22C9155BB0 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
 		F61219273CC3D55EF0E30E53 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
 		F7D55881E2CD4316284B93BF /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		A2AA11111111111111111101 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		A2AA11111111111111111102 /* AVFAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFAudio.framework; path = System/Library/Frameworks/AVFAudio.framework; sourceTree = SDKROOT; };
+		A2AA11111111111111111103 /* MediaPlayer.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MediaPlayer.framework; path = System/Library/Frameworks/MediaPlayer.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -54,6 +60,9 @@
 				E9740EDC92AE4FBA5765DC68 /* MetalKit.framework in Frameworks */,
 				DB2E6BDEF40881DDC538E30B /* QuartzCore.framework in Frameworks */,
 				E7EBC70B833929E4D92BBBA5 /* Security.framework in Frameworks */,
+				A1AA11111111111111111101 /* AVFoundation.framework in Frameworks */,
+				A1AA11111111111111111102 /* AVFAudio.framework in Frameworks */,
+				A1AA11111111111111111103 /* MediaPlayer.framework in Frameworks */,
 				66788868DB6EB3F2205C3CC8 /* UIKit.framework in Frameworks */,
 				6CF8F400319359A6FED9DBD9 /* WebKit.framework in Frameworks */,
 			);
@@ -128,6 +137,9 @@
 				96FAFD0FD4ABC794290E6E70 /* MetalKit.framework */,
 				F61219273CC3D55EF0E30E53 /* QuartzCore.framework */,
 				F7D55881E2CD4316284B93BF /* Security.framework */,
+				A2AA11111111111111111101 /* AVFoundation.framework */,
+				A2AA11111111111111111102 /* AVFAudio.framework */,
+				A2AA11111111111111111103 /* MediaPlayer.framework */,
 				29DA86769F3EE45E654C91C8 /* UIKit.framework */,
 				204F4418435D4098F99B5F26 /* WebKit.framework */,
 			);
@@ -182,6 +194,13 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					3961557BB2878CDD727CAD1D = {
+						SystemCapabilities = {
+							com.apple.BackgroundModes = { enabled = 1; };
+						};
+					};
+				};
 			};
 			buildConfigurationList = 6D50A12FD98F9CCE5126D5D4 /* Build configuration list for PBXProject "mypod-desktop" */;
 			developmentRegion = en;

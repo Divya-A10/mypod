@@ -57,6 +57,7 @@ pub fn run() {
             ios_playback::play_local_track,
             ios_playback::pause_local_playback,
             ios_playback::seek_local_playback,
+            ios_playback::set_local_playback_queue,
             ios_playback::local_playback_state,
             ios_audio_matching::list_audio_match_review,
             ios_audio_matching::set_audio_match,
