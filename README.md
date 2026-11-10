@@ -1,5 +1,8 @@
 # myPod
 
+<img width="416" height="703" alt="Screenshot 2026-11-10 at 9 58 08 AM" src="https://github.com/user-attachments/assets/af6a1c81-ee75-4b09-bbdd-2cf15dd526dd" />                                                    <img width="416" height="703" alt="Screenshot 2026-11-10 at 9 57 40 AM" src="https://github.com/user-attachments/assets/59cf8766-1556-4063-89f0-3f4e9ead8352" />
+
+
 myPod (LocalPod) is a local-first music player and personal recommendation system. The backend indexes local audio into SQLite. A responsive React interface and Tauri desktop shell are in place as an initial UI pass. Desktop playback APIs and managed iOS imports, native playback, playlists, Spotify metadata import, and conservative audio matching are implemented. Some recommendation and artwork features remain future work.
 
 <img width="7162" height="9662" alt="diagram" src="https://github.com/user-attachments/assets/24742636-7c38-44b5-b810-2a683f361643" />
